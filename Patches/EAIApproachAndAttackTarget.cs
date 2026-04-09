@@ -147,8 +147,8 @@ namespace DeadAir_7LongDarkDays.Patches
                         fleeDot = Vector3.Dot(targetMotion.normalized, forward);
                     }
 
-                    bool inHardCloseBand = dist >= .90f && dist <= 5.50f;
-                    bool playerIsFleeing = targetSpeed >= 0.18f && fleeDot >= 0.25f;
+                    bool inHardCloseBand = dist >= .90f && dist <= 6.50f;
+                    bool playerIsFleeing = targetSpeed >= 0.12f && fleeDot >= 0.15f;
 
                     if (inHardCloseBand && playerIsFleeing)
                     {
@@ -183,7 +183,7 @@ namespace DeadAir_7LongDarkDays.Patches
                 // That means we keep the pack from stacking perfectly,
                 // while still making them chase more directly overall.
                 // ------------------------------------------------------------
-                if (dist >= 1.35f && dist <= 8.5f)
+                if (dist >= 1.35f && dist <= 10f)
                 {
                     Vector3 lateral = new Vector3(-forward.z, 0f, forward.x);
 
@@ -209,8 +209,8 @@ namespace DeadAir_7LongDarkDays.Patches
 
                     if (hardCloseApplied)
                     {
-                        lateralAmount *= 0.45f;
-                        radialJitter *= 0.25f;
+                        lateralAmount *= 0.25f;
+                        radialJitter *= 0.10f;
                     }
 
                     Vector3 adjusted = baseGoal + lateral * (side * lateralAmount) + forward * radialJitter;

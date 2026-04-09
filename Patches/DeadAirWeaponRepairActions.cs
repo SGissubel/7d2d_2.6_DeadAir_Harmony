@@ -42,7 +42,14 @@ namespace DeadAir_7LongDarkDays.Patches
           }
       }
 
+      /// <summary>Preferred: uses live <see cref="Inventory"/> slots. Falls back to reflection scan if needed.</summary>
       internal static int CountPlayerItem(EntityPlayerLocal player, string itemName)
+      {
+          return DeadAirInventoryItemRemoval.CountNamedItem(player, itemName);
+      }
+
+      /// <summary>Fallback when <see cref="Inventory.GetItem"/> is unavailable.</summary>
+      internal static int CountPlayerItemLegacy(EntityPlayerLocal player, string itemName)
       {
           if (player == null || string.IsNullOrEmpty(itemName))
           {
@@ -81,7 +88,12 @@ namespace DeadAir_7LongDarkDays.Patches
           return total;
       }
 
-      static bool RemovePlayerItems(EntityPlayerLocal player, string itemName, int count)
+      internal static bool RemovePlayerItems(EntityPlayerLocal player, string itemName, int count)
+      {
+          return DeadAirInventoryItemRemoval.TryRemoveNamedItem(player, itemName, count);
+      }
+
+      internal static bool RemovePlayerItemsLegacy(EntityPlayerLocal player, string itemName, int count)
       {
           if (player == null || string.IsNullOrEmpty(itemName) || count <= 0)
           {
@@ -391,10 +403,11 @@ namespace DeadAir_7LongDarkDays.Patches
               return;
           }
 
-          var player = GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
+          var player = button?.xui?.playerUI?.entityPlayer as EntityPlayerLocal
+              ?? GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
           if (player == null)
           {
-              CompatLog.Out("[DeadAirRepair] FAIL: primary player not found");
+              CompatLog.Out("[DeadAirRepair] FAIL: no local player from bench UI / primary player");
               return;
           }
 
@@ -439,6 +452,13 @@ namespace DeadAir_7LongDarkDays.Patches
           {
               CompatLog.Out("[DeadAirRepair] FAIL: unsupported or invalid weapon");
               DeadAirNotify.Msg(player, "deadairRepairNotWeapon");
+              return;
+          }
+
+          if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(weaponClass.Name))
+          {
+              CompatLog.Out("[DeadAirRepair] FAIL: bench refurb is for firearms only (not bows/crossbows)");
+              DeadAirNotify.Msg(player, "deadairRepairBenchFirearmsOnly");
               return;
           }
 

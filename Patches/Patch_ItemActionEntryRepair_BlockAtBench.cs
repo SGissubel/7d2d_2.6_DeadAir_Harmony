@@ -37,7 +37,9 @@ namespace DeadAir_7LongDarkDays.Patches
                 return true;
             }
 
-            if (!DeadAirGameApiCompat.ItemClassRepairToolsMentions(ic, DeadAirWeaponRepairState.RepairKitName))
+            // Any vanilla/context-menu repair on supported weapons at this bench must use the Repair button
+            // (kits + parts). Weapons often still list resourceRepairKit, not resourceWeaponRepairKit.
+            if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(ic.Name))
             {
                 return true;
             }
@@ -52,8 +54,33 @@ namespace DeadAir_7LongDarkDays.Patches
 
         internal static ItemStack TryGetItemStack(ItemActionEntryRepair __instance)
         {
+            if (__instance == null)
+            {
+                return null;
+            }
+
             var tr = Traverse.Create(__instance);
-            foreach (var field in new[] { "itemStack", "stack", "m_itemStack", "focusedItemStack" })
+
+            foreach (var prop in new[] { "ItemStack", "itemStack", "FocusedItemStack", "m_ItemStack" })
+            {
+                try
+                {
+                    var p = tr.Property(prop);
+                    if (p.PropertyExists())
+                    {
+                        var v = p.GetValue() as ItemStack;
+                        if (v != null)
+                        {
+                            return v;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            foreach (var field in new[] { "itemStack", "stack", "m_itemStack", "focusedItemStack", "m_ItemStack" })
             {
                 var f = tr.Field(field);
                 if (f.FieldExists())

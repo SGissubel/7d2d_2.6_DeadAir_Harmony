@@ -87,6 +87,12 @@ namespace DeadAir_7LongDarkDays.Patches
             return !string.IsNullOrEmpty(itemName) && SupportedWeapons.Contains(itemName);
         }
 
+        /// <summary>Supported ranged weapon that is a firearm.</summary>
+        public static bool IsFirearmSupportedWeapon(string itemName)
+        {
+            return IsSupportedWeapon(itemName);
+        }
+
         public static string GetRepairPartName(string itemName)
         {
             switch (itemName)

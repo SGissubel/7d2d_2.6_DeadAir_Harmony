@@ -13,7 +13,12 @@ namespace DeadAir_7LongDarkDays.Patches
         /// Seconds spent in buffElementFreezing or buffElementSweltering since last HP tick (1 Hz, reset when safe).
         /// </summary>
         private static readonly Dictionary<int, int> ExtremeThermalSecondsByEntityId = new Dictionary<int, int>();
+        /// <summary>
+        /// Seconds spent soaked + cold (not yet freezing) since last HP tick.
+        /// </summary>
+        private static readonly Dictionary<int, int> WetColdSecondsByEntityId = new Dictionary<int, int>();
         private const int ExtremeThermalHealthLossSeconds = 30;
+        private const int WetColdHealthLossSeconds = 40;
         private static readonly string[] ManagedBuffs =
         {
             "buffDeadAirWetShockOutdoor1",
@@ -40,6 +45,7 @@ namespace DeadAir_7LongDarkDays.Patches
             {
                 UpdateThermalState(__instance);
                 ApplyExtremeThermalHealthDrain(__instance);
+                ApplyWetColdHealthDrain(__instance);
             }
             catch (Exception ex)
             {
@@ -70,6 +76,39 @@ namespace DeadAir_7LongDarkDays.Patches
                 return;
             }
             ExtremeThermalSecondsByEntityId[entityId] = 0;
+            if (player.IsDead())
+            {
+                return;
+            }
+            player.AddHealth(-1);
+            player.FireEvent(MinEventTypes.onSelfDamagedSelf);
+        }
+        /// <summary>
+        /// Soaked + cold (core temp still in "cold" band, not freezing): steady HP loss. Slightly slower tick than true freezing.
+        /// </summary>
+        private static void ApplyWetColdHealthDrain(EntityPlayerLocal player)
+        {
+            int entityId = player.entityId;
+            bool isWet = player.Buffs.HasBuff("buffElementWet");
+            bool isCold = player.Buffs.HasBuff("buffElementCold");
+            bool isFreezing = player.Buffs.HasBuff("buffElementFreezing");
+            bool wetColdHypothermia = isWet && isCold && !isFreezing;
+            if (!wetColdHypothermia)
+            {
+                WetColdSecondsByEntityId.Remove(entityId);
+                return;
+            }
+            if (!WetColdSecondsByEntityId.TryGetValue(entityId, out int seconds))
+            {
+                seconds = 0;
+            }
+            seconds++;
+            if (seconds < WetColdHealthLossSeconds)
+            {
+                WetColdSecondsByEntityId[entityId] = seconds;
+                return;
+            }
+            WetColdSecondsByEntityId[entityId] = 0;
             if (player.IsDead())
             {
                 return;
