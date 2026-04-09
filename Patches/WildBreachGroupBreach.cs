@@ -1,8 +1,7 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -11,291 +10,297 @@ namespace DeadAir_7LongDarkDays.Patches
     [HarmonyPatch]
     public static class WildBreachGroupBreach
     {
-        private const float BaseMultiplier      = 2.10f;
-        private const float PerZombieBonus      = 0.45f;
-        private const float MaxMultiplier       = 6.00f;
-        private const float NearbyRadius        = 3.75f;
+        // =========================================================
+        // TUNING
+        // =========================================================
 
-        private const float SplashDamageFrac    = 0.65f;
+        // Direct hit pressure on the primary struck block.
+        private const float BaseMultiplier = 4f;
+        private const float PerZombieBonus = 1.85f;
+    
 
-        private const float EntranceDirectBonus = 1.35f;
-        private const int   GroupThreshold      = 4;
-        private const float GroupSurgeBonus     = 1.40f;
+        private const int SurgeThreshold = 3;
+        private const int RageThreshold = 5;
 
-        private const int   RageThreshold       = 6;
-        private const float RageBonus           = 1.75f;
+        // Group escalation thresholds.
+        private const float SurgeBonus = 2f;
+        private const float RageBonus = 2.50f;
+        private const float EntranceDirectBonus = 2.50f;
 
-        private static readonly string[] EntranceTags =
-        {
-            "door", "hatch", "bars", "bar", "windowBars", "windowbar", "gate"
-        };
+        private const float NearbyRadius = 4.25f;
 
+        // Final hard cap after ALL bonuses.
+        // Kept intentionally high because the goal is violent breach pressure.
+        private const float MaxFinalMultiplier = 35.82f;
+
+        // Spread tuning.
+        // Surge = strong widening, but not quite full-copy.
+        private const float SurgeSpreadFrac = 0.90f;
+
+        // Rage = full-copy brutal spread.
+        private const float RageSpreadFrac = 1.00f;
+
+        // Extra tear-out only on destroy behavior, to widen beyond the initial face.
+        private const float DestroyFollowThroughFrac = 1.50f;
+
+        // Cache the last boosted direct damage for the entity so the destroy hook
+        // can use the same brutality level when a block actually gives way.
         private static readonly Dictionary<int, int> LastBoostedDamageByEntity = new Dictionary<int, int>();
 
-        [HarmonyPatch(typeof(EntityAlive), nameof(EntityAlive.CalculateBlockDamage))]
-        [HarmonyPostfix]
-        public static void CalculateBlockDamage_Postfix(EntityAlive __instance, BlockDamage block, int defaultBlockDamage, ref int __result)
+        // =========================================================
+        // PRIMARY HOT PATH: ITEMACTIONATTACK.HIT
+        // =========================================================
+
+        [HarmonyPatch(typeof(ItemActionAttack), "Hit")]
+        [HarmonyPrefix]
+        public static void Hit_Prefix(
+            WorldRayHitInfo hitInfo,
+            int _attackerEntityId,
+            ref float _blockDamage,
+            ItemActionAttack.AttackHitInfo _attackDetails)
         {
             try
             {
-                if (__instance == null || __result <= 0) return;
-                if (!(__instance is EntityZombie)) return;
-                if (block == null) return;
+                World world = GameManager.Instance?.World;
+                if (world == null) return;
 
-                Vector3i hitPos = GetBlockPosFromBlockDamage(block);
+                Entity entity = world.GetEntity(_attackerEntityId);
+                if (!(entity is EntityZombie zombie)) return;
+                if (!zombie.IsAlive()) return;
 
-                if (hitPos != Vector3i.zero)
-                {
-                    if (!IsBreachRelevantPosition(hitPos)) return;
-                }
-                else
-                {
-                    if (!IsEntranceBlock(block)) return;
-                }
+                if (_attackDetails == null) return;
+                if (!_attackDetails.bBlockHit) return;
 
-                int nearbyZeds = hitPos != Vector3i.zero
-                    ? CountNearbyZombiesAt(hitPos, NearbyRadius)
-                    : CountNearbyZombies(__instance, NearbyRadius);
+                Vector3i hitPos = GetHitPos(hitInfo, _attackDetails);
+                if (hitPos == Vector3i.zero) return;
 
-                float mult = BaseMultiplier + Math.Max(0, nearbyZeds - 1) * PerZombieBonus;
-                mult = Mathf.Min(mult, MaxMultiplier);
+                // Tight doorway-only targeting for the direct rage logic.
+                if (!IsDirectBreachTarget(hitPos)) return;
 
-                if (nearbyZeds >= GroupThreshold)
-                    mult *= GroupSurgeBonus;
+                int nearbyZeds = CountNearbyZombiesAt(hitPos, NearbyRadius);
+
+                float mult = BaseMultiplier + Mathf.Max(0, nearbyZeds - 1) * PerZombieBonus;
+
+                if (IsEntranceBlock(world, hitPos))
+                    mult *= EntranceDirectBonus;
+
+                if (nearbyZeds >= SurgeThreshold)
+                    mult *= SurgeBonus;
 
                 if (nearbyZeds >= RageThreshold)
                     mult *= RageBonus;
 
-                if (hitPos != Vector3i.zero && IsEntranceBlock(GameManager.Instance?.World, hitPos))
-                    mult *= EntranceDirectBonus;
+                // Clamp AFTER all bonuses.
+                mult = Mathf.Min(mult, MaxFinalMultiplier);
 
-                int boosted = Mathf.RoundToInt(__result * mult);
-                if (boosted > __result) __result = boosted;
+                float boosted = _blockDamage * mult;
+                if (boosted > _blockDamage)
+                    _blockDamage = boosted;
 
-                LastBoostedDamageByEntity[__instance.entityId] = __result;
+                int boostedInt = Mathf.Max(1, Mathf.RoundToInt(_blockDamage));
+                LastBoostedDamageByEntity[_attackerEntityId] = boostedInt;
+
+                // WIDENING IN THE HOT PATH:
+                // This is intentionally additive. We do NOT split the damage budget.
+                // The struck block gets full direct damage from Hit itself.
+                // Neighbor blocks get their own additional damage copies via WorldDamageShim.
+                ImpactPattern pattern = GetImpactPattern(hitPos, zombie);
+
+                if (nearbyZeds >= RageThreshold)
+                {
+                    int rageDamage = Mathf.Max(1, Mathf.RoundToInt(_blockDamage * RageSpreadFrac));
+
+                    // Full-copy brutal spread across the doorway face.
+                    ApplySplash(world, pattern.Left,    rageDamage, _attackerEntityId, hitPos);
+                    ApplySplash(world, pattern.Right,   rageDamage, _attackerEntityId, hitPos);
+                    ApplySplash(world, pattern.Up,      rageDamage, _attackerEntityId, hitPos);
+                    ApplySplash(world, pattern.Forward, rageDamage, _attackerEntityId, hitPos);
+                }
+                else if (nearbyZeds >= SurgeThreshold)
+                {
+                    int surgeDamage = Mathf.Max(1, Mathf.RoundToInt(_blockDamage * SurgeSpreadFrac));
+
+                    // Still nasty, but a little less absurd until full rage.
+                    ApplySplash(world, pattern.Left,  surgeDamage, _attackerEntityId, hitPos);
+                    ApplySplash(world, pattern.Right, surgeDamage, _attackerEntityId, hitPos);
+                    ApplySplash(world, pattern.Up,    surgeDamage, _attackerEntityId, hitPos);
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                CompatLog.Out($"[DeadAir][WildBreach] Hit_Prefix error: {ex}");
+            }
         }
 
-        [HarmonyPatch(typeof(EntityAlive), "ExecuteDestroyBlockBehavior")]
+        // =========================================================
+        // SECONDARY HOOK: EXECUTEDESTROYBLOCKBEHAVIOR
+        // Used only as follow-through to rip the opening wider once things fail.
+        // =========================================================
+
+        [HarmonyPatch(typeof(EntityHuman), "ExecuteDestroyBlockBehavior",
+            new[] { typeof(EntityAlive.DestroyBlockBehavior), typeof(ItemActionAttack.AttackHitInfo) })]
         [HarmonyPostfix]
-        public static void ExecuteDestroyBlockBehavior_Postfix(EntityAlive __instance, object behavior, object attackHitInfo, ref bool __result)
+        public static void ExecuteDestroyBlockBehavior_Postfix(
+            EntityHuman __instance,
+            EntityAlive.DestroyBlockBehavior behavior,
+            ItemActionAttack.AttackHitInfo attackHitInfo,
+            ref bool __result)
         {
             try
             {
                 if (!__result) return;
                 if (__instance == null) return;
-                if (!(__instance is EntityZombie)) return;
-                if (!GetBoolProperty(__instance, "IsBreakingBlocks")) return;
+                if (!(__instance is EntityZombie zombie)) return;
+                if (!zombie.IsAlive()) return;
+                if (attackHitInfo == null) return;
 
-                Vector3i hitPos = GetVector3iFromAttackHitInfo(attackHitInfo);
-                if (hitPos == Vector3i.zero) return;
-
-                var world = GameManager.Instance?.World;
+                World world = GameManager.Instance?.World;
                 if (world == null) return;
 
-                BlockValue hitBV = world.GetBlock(hitPos);
-                if (hitBV.isair) return;
+                Vector3i hitPos = attackHitInfo.hitPosition;
+                if (hitPos == Vector3i.zero) return;
 
-                Block hitBlock = Block.list[hitBV.type];
-                if (hitBlock == null) return;
-                if (!IsBreachRelevantPosition(hitPos)) return;
+                if (!IsDirectBreachTarget(hitPos)) return;
 
                 int nearbyZeds = CountNearbyZombiesAt(hitPos, NearbyRadius);
+                if (nearbyZeds < SurgeThreshold) return;
 
-                int mainDamage;
-                if (!LastBoostedDamageByEntity.TryGetValue(__instance.entityId, out mainDamage) || mainDamage <= 0)
-                {
-                    float mult = BaseMultiplier + Math.Max(0, nearbyZeds - 1) * PerZombieBonus;
-                    mult = Mathf.Min(mult, MaxMultiplier);
+                int mainDamage = 25;
+                if (LastBoostedDamageByEntity.TryGetValue(__instance.entityId, out int cached) && cached > 0)
+                    mainDamage = cached;
 
-                    if (nearbyZeds >= GroupThreshold)
-                        mult *= GroupSurgeBonus;
+                ImpactPattern pattern = GetImpactPattern(hitPos, zombie);
 
-                    if (nearbyZeds >= RageThreshold)
-                        mult *= RageBonus;
-
-                    if (IsEntranceBlock(world, hitPos))
-                        mult *= EntranceDirectBonus;
-
-                    int baseDmg = TryGetIntMethod(__instance, "GetBlockDamage") ?? 25;
-                    mainDamage = Mathf.RoundToInt(baseDmg * mult);
-                }
-
-                Vector3i anchorPos = FindNearestEntranceAnchor(hitPos);
-                List<Vector3i> cluster = anchorPos != Vector3i.zero
-                    ? GetDoorwayCluster(anchorPos)
-                    : GetFallbackCluster(hitPos);
-
-                if (cluster.Count == 0) return;
-
-                // In rage mode, hit more of the doorway face and hit it harder.
-                int clusterHits;
-                float clusterFrac;
-
+                // This hook is not the main damage engine anymore.
+                // It is used to widen beyond the initial face once blocks start failing.
                 if (nearbyZeds >= RageThreshold)
                 {
-                    clusterHits = 6;
-                    clusterFrac = 1.10f;
-                }
-                else if (nearbyZeds >= 4)
-                {
-                    clusterHits = 3;
-                    clusterFrac = SplashDamageFrac;
+                    int rageFollowThrough = Mathf.Max(1, Mathf.RoundToInt(mainDamage * DestroyFollowThroughFrac));
+
+                    ApplySplash(world, pattern.LeftForward,  rageFollowThrough, __instance.entityId, hitPos);
+                    ApplySplash(world, pattern.RightForward, rageFollowThrough, __instance.entityId, hitPos);
+                    ApplySplash(world, pattern.Down,         rageFollowThrough, __instance.entityId, hitPos);
                 }
                 else
                 {
-                    clusterHits = 1;
-                    clusterFrac = 0.50f;
-                }
+                    int surgeFollowThrough = Mathf.Max(1, Mathf.RoundToInt(mainDamage * 0.75f));
 
-                int clusterDamage = Mathf.Max(1, Mathf.RoundToInt(mainDamage * clusterFrac));
-
-                int applied = 0;
-                for (int i = 0; i < cluster.Count && applied < clusterHits; i++)
-                {
-                    Vector3i p = cluster[i];
-
-                    // Avoid double-applying to the exact same block that was just hit naturally.
-                    if (p == hitPos) continue;
-
-                    BlockValue bv = world.GetBlock(p);
-                    if (bv.isair) continue;
-
-                    Block b = Block.list[bv.type];
-                    if (b == null) continue;
-
-                    WorldDamageShim.DamageBlock(world, p, clusterDamage, __instance.entityId);
-                    applied++;
+                    ApplySplash(world, pattern.LeftForward,  surgeFollowThrough, __instance.entityId, hitPos);
+                    ApplySplash(world, pattern.RightForward, surgeFollowThrough, __instance.entityId, hitPos);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                CompatLog.Out($"[DeadAir][WildBreach] ExecuteDestroyBlockBehavior error: {ex}");
+            }
         }
 
-        private static bool IsBreachRelevantPosition(Vector3i pos)
+        // =========================================================
+        // IMPACT SHAPE
+        // =========================================================
+
+        private struct ImpactPattern
+        {
+            public Vector3i Left;
+            public Vector3i Right;
+            public Vector3i Up;
+            public Vector3i Down;
+            public Vector3i Forward;
+            public Vector3i LeftForward;
+            public Vector3i RightForward;
+        }
+
+        private static ImpactPattern GetImpactPattern(Vector3i hitPos, EntityAlive entity)
+        {
+            Vector3 hitCenter = new Vector3(hitPos.x + 0.5f, hitPos.y + 0.5f, hitPos.z + 0.5f);
+            Vector3 dir = hitCenter - entity.position;
+            dir.y = 0f;
+
+            if (dir.sqrMagnitude < 0.0001f)
+                dir = entity.GetForwardVector();
+
+            dir.y = 0f;
+            if (dir.sqrMagnitude < 0.0001f)
+                dir = Vector3.forward;
+
+            dir.Normalize();
+
+            Vector3 right = new Vector3(dir.z, 0f, -dir.x);
+
+            Vector3i forward = ToCardinal(dir);
+            Vector3i rightCard = ToCardinal(right);
+
+            if (rightCard == Vector3i.zero)
+                rightCard = new Vector3i(1, 0, 0);
+
+            return new ImpactPattern
+            {
+                Left = hitPos - rightCard,
+                Right = hitPos + rightCard,
+                Up = hitPos + Vector3i.up,
+                Down = hitPos + Vector3i.down,
+                Forward = hitPos + forward,
+                LeftForward = hitPos - rightCard + forward,
+                RightForward = hitPos + rightCard + forward
+            };
+        }
+
+        private static Vector3i ToCardinal(Vector3 v)
+        {
+            if (Mathf.Abs(v.x) >= Mathf.Abs(v.z))
+                return new Vector3i(v.x >= 0f ? 1 : -1, 0, 0);
+
+            return new Vector3i(0, 0, v.z >= 0f ? 1 : -1);
+        }
+
+        // =========================================================
+        // POSITION / TARGETING HELPERS
+        // =========================================================
+
+        private static Vector3i GetHitPos(WorldRayHitInfo hitInfo, ItemActionAttack.AttackHitInfo attackHitInfo)
         {
             try
             {
-                var world = GameManager.Instance?.World;
-                if (world == null) return false;
+                if (attackHitInfo != null && attackHitInfo.hitPosition != Vector3i.zero)
+                    return attackHitInfo.hitPosition;
 
-                if (IsEntranceBlock(world, pos)) return true;
+                if (hitInfo.hit.blockPos != Vector3i.zero)
+                    return hitInfo.hit.blockPos;
 
-                var offsets = new[]
-                {
-                    new Vector3i( 1, 0, 0), new Vector3i(-1, 0, 0),
-                    new Vector3i( 0, 1, 0), new Vector3i( 0,-1, 0),
-                    new Vector3i( 0, 0, 1), new Vector3i( 0, 0,-1),
-
-                    new Vector3i( 1, 1, 0), new Vector3i(-1, 1, 0),
-                    new Vector3i( 1,-1, 0), new Vector3i(-1,-1, 0),
-
-                    new Vector3i( 0, 1, 1), new Vector3i( 0, 1,-1),
-                    new Vector3i( 0,-1, 1), new Vector3i( 0,-1,-1),
-                };
-
-                foreach (var o in offsets)
-                {
-                    if (IsEntranceBlock(world, pos + o))
-                        return true;
-                }
+                if (hitInfo.fmcHit.blockPos != Vector3i.zero)
+                    return hitInfo.fmcHit.blockPos;
             }
-            catch { }
-
-            return false;
-        }
-
-        private static Vector3i FindNearestEntranceAnchor(Vector3i origin)
-        {
-            try
+            catch
             {
-                var world = GameManager.Instance?.World;
-                if (world == null) return Vector3i.zero;
-
-                var search = new List<Vector3i>
-                {
-                    origin,
-
-                    origin + new Vector3i( 1, 0, 0), origin + new Vector3i(-1, 0, 0),
-                    origin + new Vector3i( 0, 1, 0), origin + new Vector3i( 0,-1, 0),
-                    origin + new Vector3i( 0, 0, 1), origin + new Vector3i( 0, 0,-1),
-
-                    origin + new Vector3i( 1, 1, 0), origin + new Vector3i(-1, 1, 0),
-                    origin + new Vector3i( 1,-1, 0), origin + new Vector3i(-1,-1, 0),
-
-                    origin + new Vector3i( 0, 1, 1), origin + new Vector3i( 0, 1,-1),
-                    origin + new Vector3i( 0,-1, 1), origin + new Vector3i( 0,-1,-1),
-                };
-
-                foreach (var p in search)
-                {
-                    if (IsEntranceBlock(world, p))
-                        return p;
-                }
             }
-            catch { }
 
             return Vector3i.zero;
         }
 
-        private static List<Vector3i> GetDoorwayCluster(Vector3i anchor)
+        // Tight doorway-only target check for the direct Hit hook.
+        // Only the entrance block itself or immediate one-block frame neighbors qualify.
+        private static bool IsDirectBreachTarget(Vector3i pos)
         {
-            // Ordered on purpose:
-            // anchor first, then header, then lower sides, then mid sides, then upper sides/below.
-            var raw = new[]
+            World world = GameManager.Instance?.World;
+            if (world == null) return false;
+
+            if (IsEntranceBlock(world, pos))
+                return true;
+
+            Vector3i[] immediate =
             {
-                anchor,
-                anchor + new Vector3i( 0, 1, 0),   // above door / header
-                anchor + new Vector3i(-1, 0, 0),   // mid left
-                anchor + new Vector3i( 1, 0, 0),   // mid right
-                anchor + new Vector3i(-1,-1, 0),   // bottom left
-                anchor + new Vector3i( 1,-1, 0),   // bottom right
-                anchor + new Vector3i(-1, 1, 0),   // top left
-                anchor + new Vector3i( 1, 1, 0),   // top right
-                anchor + new Vector3i( 0,-1, 0),   // below door
+                new Vector3i( 1, 0, 0), new Vector3i(-1, 0, 0),
+                new Vector3i( 0, 1, 0), new Vector3i( 0,-1, 0),
+                new Vector3i( 0, 0, 1), new Vector3i( 0, 0,-1)
             };
 
-            return FilterUniqueSolidPositions(raw);
-        }
-
-        private static List<Vector3i> GetFallbackCluster(Vector3i center)
-        {
-            var raw = new[]
+            for (int i = 0; i < immediate.Length; i++)
             {
-                center,
-                center + new Vector3i( 0, 1, 0),
-                center + new Vector3i(-1, 0, 0),
-                center + new Vector3i( 1, 0, 0),
-                center + new Vector3i(-1,-1, 0),
-                center + new Vector3i( 1,-1, 0),
-                center + new Vector3i( 0,-1, 0),
-            };
-
-            return FilterUniqueSolidPositions(raw);
-        }
-
-        private static List<Vector3i> FilterUniqueSolidPositions(IEnumerable<Vector3i> positions)
-        {
-            var result = new List<Vector3i>();
-            var seen = new HashSet<string>();
-            var world = GameManager.Instance?.World;
-            if (world == null) return result;
-
-            foreach (var p in positions)
-            {
-                string key = $"{p.x},{p.y},{p.z}";
-                if (!seen.Add(key)) continue;
-
-                BlockValue bv = world.GetBlock(p);
-                if (bv.isair) continue;
-
-                Block b = Block.list[bv.type];
-                if (b == null) continue;
-
-                result.Add(p);
+                if (IsEntranceBlock(world, pos + immediate[i]))
+                    return true;
             }
 
-            return result;
+            return false;
         }
 
         private static bool IsEntranceBlock(World world, Vector3i pos)
@@ -310,71 +315,12 @@ namespace DeadAir_7LongDarkDays.Patches
                 Block b = Block.list[bv.type];
                 if (b == null) return false;
 
-                return IsEntranceBlock(b);
-            }
-            catch { }
+                string n = b.GetBlockName()?.ToLowerInvariant() ?? string.Empty;
 
-            return false;
-        }
-
-        private static bool IsEntranceBlock(BlockDamage bd)
-        {
-            try
-            {
-                var t = bd.GetType();
-                var prop =
-                    AccessTools.Property(t, "blockName") ??
-                    AccessTools.Property(t, "BlockName") ??
-                    AccessTools.Property(t, "name");
-
-                if (prop != null)
-                {
-                    string n = (prop.GetValue(bd, null) as string) ?? "";
-                    return LooksLikeEntranceName(n);
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static Vector3i GetBlockPosFromBlockDamage(BlockDamage bd)
-        {
-            try
-            {
-                var t = bd.GetType();
-                string[] names = { "blockPos", "BlockPos", "pos", "Pos", "hitPos", "HitPos" };
-
-                foreach (var n in names)
-                {
-                    var f = AccessTools.Field(t, n);
-                    if (f != null && f.GetValue(bd) is Vector3i fv) return fv;
-
-                    var p = AccessTools.Property(t, n);
-                    if (p != null && p.GetValue(bd, null) is Vector3i pv) return pv;
-                }
-            }
-            catch { }
-
-            return Vector3i.zero;
-        }
-
-        private static bool HasTagSafe(Block block, string tagName)
-        {
-            try
-            {
-                if (block == null || string.IsNullOrEmpty(tagName)) return false;
-
-                var blockTagsType = AccessTools.TypeByName("BlockTags");
-                if (blockTagsType == null || !blockTagsType.IsEnum) return false;
-
-                object enumValue = Enum.Parse(blockTagsType, tagName, ignoreCase: true);
-
-                var hasTagMethod = AccessTools.Method(block.GetType(), "HasTag", new Type[] { blockTagsType });
-                if (hasTagMethod == null) return false;
-
-                var result = hasTagMethod.Invoke(block, new object[] { enumValue });
-                return result is bool b && b;
+                return n.Contains("door")
+                    || n.Contains("hatch")
+                    || n.Contains("bars")
+                    || n.Contains("gate");
             }
             catch
             {
@@ -382,133 +328,55 @@ namespace DeadAir_7LongDarkDays.Patches
             }
         }
 
-        private static bool IsEntranceBlock(Block b)
-        {
-            try
-            {
-                foreach (var tag in EntranceTags)
-                    if (HasTagSafe(b, tag)) return true;
-
-                return LooksLikeEntranceName(b.GetBlockName());
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool LooksLikeEntranceName(string n)
-        {
-            if (string.IsNullOrEmpty(n)) return false;
-            n = n.ToLowerInvariant();
-            return n.Contains("door") || n.Contains("hatch") || n.Contains("bars") || n.Contains("bar") || n.Contains("gate");
-        }
-
-        private static int CountNearbyZombies(EntityAlive self, float radius)
-        {
-            try
-            {
-                if (self == null) return 1;
-                return CountNearbyZombiesAt(self.position, radius);
-            }
-            catch { }
-
-            return 1;
-        }
+        // =========================================================
+        // ENTITY / DAMAGE HELPERS
+        // =========================================================
 
         private static int CountNearbyZombiesAt(Vector3 pos, float radius)
         {
-            try
+            World world = GameManager.Instance?.World;
+            if (world?.Entities?.list == null)
+                return 1;
+
+            int count = 0;
+            float radiusSq = radius * radius;
+
+            var entities = world.Entities.list;
+            for (int i = 0; i < entities.Count; i++)
             {
-                var world = GameManager.Instance?.World;
-                if (world == null) return 1;
+                if (!(entities[i] is EntityZombie zombie)) continue;
+                if (!zombie.IsAlive()) continue;
 
-                var bounds = new Bounds(pos, new Vector3(radius * 2f, radius * 2f, radius * 2f));
-
-                var m = AccessTools.Method(world.GetType(), "GetEntitiesInBounds");
-                if (m == null) return 1;
-
-                var pars = m.GetParameters();
-
-                if (pars.Length == 2 && pars[0].ParameterType == typeof(Type) && pars[1].ParameterType == typeof(Bounds))
-                {
-                    var list = m.Invoke(world, new object[] { typeof(EntityZombie), bounds }) as IList;
-                    if (list == null) return 1;
-
-                    int count = 0;
-                    foreach (var o in list)
-                        if (o is EntityZombie) count++;
-
-                    return Math.Max(1, count);
-                }
-
-                if (pars.Length == 2 && pars[0].ParameterType == typeof(Bounds))
-                {
-                    object listObj = Activator.CreateInstance(pars[1].ParameterType);
-                    m.Invoke(world, new object[] { bounds, listObj });
-
-                    int count = 0;
-                    if (listObj is IEnumerable enumerable)
-                    {
-                        foreach (var o in enumerable)
-                            if (o is EntityZombie) count++;
-                    }
-
-                    return Math.Max(1, count);
-                }
+                Vector3 delta = zombie.position - pos;
+                if (delta.sqrMagnitude <= radiusSq)
+                    count++;
             }
-            catch { }
 
-            return 1;
+            return Mathf.Max(1, count);
         }
 
-        private static bool GetBoolProperty(object obj, string propName)
+        private static void ApplySplash(World world, Vector3i pos, int damage, int entityId, Vector3i originalHitPos)
         {
             try
             {
-                if (obj == null) return false;
-                var p = AccessTools.Property(obj.GetType(), propName);
-                if (p == null) return false;
-                return p.GetValue(obj, null) is bool b && b;
-            }
-            catch { }
-            return false;
-        }
+                if (world == null || damage <= 0) return;
+                if (pos == originalHitPos) return;
 
-        private static int? TryGetIntMethod(object obj, string methodName)
-        {
-            try
+                // Keep widening tightly scoped to doorway / immediate frame.
+                if (!IsDirectBreachTarget(pos)) return;
+
+                BlockValue bv = world.GetBlock(pos);
+                if (bv.isair) return;
+
+                Block b = Block.list[bv.type];
+                if (b == null) return;
+
+                WorldDamageShim.DamageBlock(world, pos, damage, entityId);
+            }
+            catch (Exception ex)
             {
-                if (obj == null) return null;
-                var m = AccessTools.Method(obj.GetType(), methodName);
-                if (m == null) return null;
-                var val = m.Invoke(obj, Array.Empty<object>());
-                if (val is int i) return i;
+                CompatLog.Out($"[DeadAir][WildBreach] ApplySplash error: {ex}");
             }
-            catch { }
-            return null;
-        }
-
-        private static Vector3i GetVector3iFromAttackHitInfo(object attackHitInfo)
-        {
-            if (attackHitInfo == null) return Vector3i.zero;
-
-            try
-            {
-                var t = attackHitInfo.GetType();
-                string[] names = { "hitBlockPos", "HitBlockPos", "blockPos", "BlockPos", "hitPos", "HitPos" };
-
-                foreach (var n in names)
-                {
-                    var f = AccessTools.Field(t, n);
-                    if (f != null && f.GetValue(attackHitInfo) is Vector3i fv) return fv;
-
-                    var p = AccessTools.Property(t, n);
-                    if (p != null && p.GetValue(attackHitInfo, null) is Vector3i pv) return pv;
-                }
-            }
-            catch { }
-
-            return Vector3i.zero;
         }
     }
 
@@ -549,7 +417,9 @@ namespace DeadAir_7LongDarkDays.Patches
 
                 _damageMethod.Invoke(world, _args);
             }
-            catch { }
+            catch
+            {
+            }
         }
 
         private static void Find(World world)

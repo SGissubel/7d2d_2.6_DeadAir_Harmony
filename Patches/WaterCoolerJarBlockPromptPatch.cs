@@ -1,8 +1,9 @@
+using System.Linq;
+using System.Reflection;
+using HarmonyLib;
+
 namespace DeadAir_7LongDarkDays.Patches
 {
-    using System.Linq;
-    using System.Reflection;
-    using HarmonyLib;
 
     [HarmonyPatch]
     public static class WaterCoolerJarBlockPromptPatch_HasCommands
@@ -69,8 +70,9 @@ namespace DeadAir_7LongDarkDays.Patches
 
             ItemValue holdingItem = player.inventory?.holdingItemItemValue ?? ItemValue.None;
             string heldName = holdingItem.IsEmpty() ? null : holdingItem.ItemClass?.Name;
+            bool emptyHands = holdingItem.IsEmpty() || heldName == "meleeHandPlayer";
 
-            if (heldName == "drinkJarEmpty")
+            if (heldName == "drinkJarEmpty" || !emptyHands)
             {
                 __result = true;
             }
@@ -142,11 +144,21 @@ namespace DeadAir_7LongDarkDays.Patches
 
             ItemValue holdingItem = player.inventory?.holdingItemItemValue ?? ItemValue.None;
             string heldName = holdingItem.IsEmpty() ? null : holdingItem.ItemClass?.Name;
+            bool emptyHands = holdingItem.IsEmpty() || heldName == "meleeHandPlayer";
 
             if (heldName == "drinkJarEmpty")
             {
-                __result = Localization.Get("ldContextFillJarFromCooler");
+                __result = "{0} Fill Jar from " + block.GetLocalizedBlockName();
+                return;
             }
+
+            if (emptyHands)
+            {
+                return;
+            }
+
+            // Anything else in hand: show guidance
+            __result = "{0} Empty your hands to drink or hold an empty jar to fill from " + block.GetLocalizedBlockName();
         }
     }
 }

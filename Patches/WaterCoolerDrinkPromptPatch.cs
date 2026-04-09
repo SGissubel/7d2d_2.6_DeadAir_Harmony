@@ -1,10 +1,9 @@
+using System.Linq;
+using System.Reflection;
+using HarmonyLib;
+
 namespace DeadAir_7LongDarkDays.Patches
 {
-    using System;
-    using System.Linq;
-    using System.Reflection;
-    using HarmonyLib;
-
     [HarmonyPatch]
     public static class WaterCoolerDrinkPromptPatch
     {
@@ -19,11 +18,6 @@ namespace DeadAir_7LongDarkDays.Patches
 
         static void Postfix(object[] __args, ref bool __result)
         {
-            if (__result)
-            {
-                return;
-            }
-
             if (__args == null || __args.Length == 0)
             {
                 return;
@@ -40,6 +34,7 @@ namespace DeadAir_7LongDarkDays.Patches
             }
 
             __result = true;
+            WaterCoolerActionHelpers.RememberDrinkCoolerTarget(actionData);
         }
     }
 }

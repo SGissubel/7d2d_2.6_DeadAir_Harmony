@@ -43,7 +43,10 @@ namespace DeadAir_7LongDarkDays.Patches
                     return;
 
                 // Soldier-only for now
-                if (target.EntityName != "zombieSoldier" || target.EntityName != "zombieDemolition" || target.EntityName != "zombieBiker")
+                if (target.EntityName != "zombieSoldier"
+                    && target.EntityName != "zombieDemolition"
+                    && target.EntityName != "zombieUtilityWorker"
+                    && target.EntityName != "zombieBiker")
                     return;
 
                 // Skip if helmet already broken

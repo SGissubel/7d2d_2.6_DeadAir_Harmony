@@ -1,9 +1,11 @@
+using System;
+using System.Linq;
+using System.Reflection;
+using HarmonyLib;
+
+
 namespace DeadAir_7LongDarkDays.Patches
 {
-    using System;
-    using System.Linq;
-    using System.Reflection;
-    using HarmonyLib;
 
     [HarmonyPatch]
     public static class WaterCoolerJarPromptPatch
@@ -39,7 +41,7 @@ namespace DeadAir_7LongDarkDays.Patches
                 return;
             }
 
-            __result = "ldContextFillJarFromCooler";
+            __result = Localization.Get("ldContextFillJarFromCooler");
         }
     }
 }
