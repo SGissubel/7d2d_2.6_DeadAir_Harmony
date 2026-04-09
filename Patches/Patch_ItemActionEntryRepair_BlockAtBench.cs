@@ -50,7 +50,7 @@ namespace DeadAir_7LongDarkDays.Patches
             return false;
         }
 
-        static ItemStack TryGetItemStack(ItemActionEntryRepair __instance)
+        internal static ItemStack TryGetItemStack(ItemActionEntryRepair __instance)
         {
             var tr = Traverse.Create(__instance);
             foreach (var field in new[] { "itemStack", "stack", "m_itemStack", "focusedItemStack" })

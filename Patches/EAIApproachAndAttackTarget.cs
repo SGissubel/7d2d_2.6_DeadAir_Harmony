@@ -128,7 +128,15 @@ namespace DeadAir_7LongDarkDays.Patches
                 // ------------------------------------------------------------
                 if (target is EntityPlayer)
                 {
-                    Vector3 targetMotion = entityTargetVel;
+                    Vector3 targetMotion = Vector3.zero;
+
+                    if (FieldEntityTargetVel != null)
+                    {
+                        object velObj = FieldEntityTargetVel.GetValue(__instance);
+                        if (velObj is Vector3 vel)
+                            targetMotion = vel;
+                    }
+
                     targetMotion.y = 0f;
 
                     float targetSpeed = targetMotion.magnitude;
@@ -139,7 +147,7 @@ namespace DeadAir_7LongDarkDays.Patches
                         fleeDot = Vector3.Dot(targetMotion.normalized, forward);
                     }
 
-                    bool inHardCloseBand = dist >= 1.10f && dist <= 3.25f;
+                    bool inHardCloseBand = dist >= .90f && dist <= 5.50f;
                     bool playerIsFleeing = targetSpeed >= 0.18f && fleeDot >= 0.25f;
 
                     if (inHardCloseBand && playerIsFleeing)
@@ -201,8 +209,8 @@ namespace DeadAir_7LongDarkDays.Patches
 
                     if (hardCloseApplied)
                     {
-                        lateralAmount *= 0.72f;
-                        radialJitter *= 0.50f;
+                        lateralAmount *= 0.45f;
+                        radialJitter *= 0.25f;
                     }
 
                     Vector3 adjusted = baseGoal + lateral * (side * lateralAmount) + forward * radialJitter;
@@ -213,15 +221,15 @@ namespace DeadAir_7LongDarkDays.Patches
 
                     if (DebugGetMoveToLocation)
                     {
-                        CompatLog.Out(
-                            $"[AntiLineup] Applied " +
-                            $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                            $"side={(side < 0f ? "LEFT" : "RIGHT")} " +
-                            $"stable01={stable01:0.000} " +
-                            $"lateralAmount={lateralAmount:0.000} radialJitter={radialJitter:0.000} " +
-                            $"directChaseApplied={directChaseApplied} hardCloseApplied={hardCloseApplied} " +
-                            $"adjustedGoal={FormatVec(adjusted)}");
-                        }
+                      CompatLog.Out(
+                          $"[AntiLineup] Applied " +
+                          $"zombie={zombie.EntityName}({zombie.entityId}) " +
+                          $"side={(side < 0f ? "LEFT" : "RIGHT")} " +
+                          $"stable01={stable01:0.000} " +
+                          $"lateralAmount={lateralAmount:0.000} radialJitter={radialJitter:0.000} " +
+                          $"directChaseApplied={directChaseApplied} hardCloseApplied={hardCloseApplied} " +
+                          $"adjustedGoal={FormatVec(adjusted)}");
+                      }
                 }
                 else if (DebugGetMoveToLocation)
                 {

@@ -12,20 +12,20 @@ namespace DeadAir_7LongDarkDays.Patches
     internal static class DeadAirWanderingHordeTunables
     {
         // --- Frequency (SetNextTime postfix) ---
-        internal const bool SetNextTimePatchEnabled = true;
+        internal static readonly bool SetNextTimePatchEnabled = true;
 
         /// <summary>
         /// Values > 1 shorten the remaining wait until HordeNextTime (e.g. 2 ≈ double frequency).
         /// </summary>
-        internal const float HordeFrequencyMultiplier = 2f;
+        internal static readonly float HordeFrequencyMultiplier = 10f;
 
         /// <summary>
         /// Log every Horde SetNextTime adjustment (recommended while tuning).
         /// </summary>
-        internal const bool SetNextTimeVerboseLog = true;
+        internal static readonly bool SetNextTimeVerboseLog = true;
 
         // --- Direction (RandomPos postfix) ---
-        internal const bool RandomPosPatchEnabled = true;
+        internal static readonly bool RandomPosPatchEnabled = true;
 
         /// <summary>
         /// 0 = vanilla; small values keep investigate bias conservative.
@@ -35,14 +35,14 @@ namespace DeadAir_7LongDarkDays.Patches
         /// <summary>
         /// Log each RandomPos bias application (can be noisy during an active horde).
         /// </summary>
-        internal const bool RandomPosVerboseLog = true;
+        internal static readonly bool RandomPosVerboseLog = true;
 
         // --- Count (SetupGroup postfix) ---
         /// <summary>
         /// Off by default: Config/gamestages.xml already scales WanderingHorde num.
         /// Enable only if you want a hard clamp on numToSpawn after SetupGroup.
         /// </summary>
-        internal const bool SetupGroupPatchEnabled = false;
+        internal static readonly bool SetupGroupPatchEnabled = false;
 
         internal const int WanderingHordeCountMin = 15;
         internal const int WanderingHordeCountMax = 30;
@@ -53,6 +53,25 @@ namespace DeadAir_7LongDarkDays.Patches
         internal const float SetupGroupCountScale = 1f;
 
         internal const bool SetupGroupVerboseLog = true;
+        // --- Route bearing (AIWanderingHordeSpawner.Update postfix) ---
+        /// <summary>
+        /// Pull public route fields <c>endPos</c> / <c>pitStopPos</c> toward the primary player each tick.
+        /// This targets the macro path the wandering runner uses; not the same as RandomPos investigate noise.
+        /// </summary>
+        internal static readonly bool SpawnerRoutePatchEnabled = true;
+
+        /// <summary>Higher = faster convergence toward the aim point (per-second smoothing, frame-rate stable).</summary>
+        internal const float RoutePullPerSecond = 0.55f;
+
+        /// <summary>Seconds of horizontal velocity lead using <see cref="EntityPlayer.GetVelocityPerSecond"/>.</summary>
+        internal const float RouteLeadSeconds = 2.25f;
+
+        /// <summary>Cap lead offset magnitude so sprinting does not fling the aim unrealistically far.</summary>
+        internal const float RouteLeadMaxHorizontal = 14f;
+
+        internal static readonly bool SpawnerRouteVerboseLog = false;
+
+        internal const float SpawnerRouteLogIntervalSeconds = 4f;
     }
 
     public static class DeadAirWanderingHordePatch
@@ -119,13 +138,35 @@ namespace DeadAir_7LongDarkDays.Patches
         }
 
         [HarmonyPostfix]
-        public static void Postfix(AIDirectorWanderingHordeComponent __instance, SpawnType _spawnType)
+        public static void Postfix(AIDirectorWanderingHordeComponent __instance, object[] __args)
         {
-            if (__instance == null || _spawnType != SpawnType.Horde)
+            if (__instance == null)
                 return;
 
             if (DeadAirWanderingHordeTunables.HordeFrequencyMultiplier <= 1f)
                 return;
+
+            string spawnTypeName = null;
+            try
+            {
+                if (__args != null && __args.Length > 0 && __args[0] != null)
+                    spawnTypeName = __args[0].ToString();
+            }
+            catch
+            {
+                spawnTypeName = null;
+            }
+
+            if (!string.Equals(spawnTypeName, "Horde", StringComparison.OrdinalIgnoreCase))
+            {
+                if (DeadAirWanderingHordeTunables.SetNextTimeVerboseLog)
+                {
+                    CompatLog.Out(
+                        $"[DeadAir] WanderingHorde SetNextTime: skipping non-horde call " +
+                        $"(spawnType={spawnTypeName ?? "null"}).");
+                }
+                return;
+            }
 
             var world = GameManager.Instance?.World;
             if (world == null || WorldWorldTimeField == null)
@@ -138,8 +179,6 @@ namespace DeadAir_7LongDarkDays.Patches
             try
             {
                 ulong now = ToUInt64(WorldWorldTimeField.GetValue(world));
-
-                // After vanilla SetNextTime body, this is the scheduled HordeNextTime.
                 ulong vanillaHordeNext = __instance.HordeNextTime;
 
                 if (vanillaHordeNext <= now)
@@ -148,7 +187,7 @@ namespace DeadAir_7LongDarkDays.Patches
                     {
                         CompatLog.Out(
                             $"[DeadAir] WanderingHorde SetNextTime: worldTime={now} vanillaHordeNext={vanillaHordeNext} " +
-                            $"(not future; no compression). spawnType={_spawnType}");
+                            $"(not future; no compression). spawnType={spawnTypeName}");
                     }
                     return;
                 }
@@ -164,7 +203,7 @@ namespace DeadAir_7LongDarkDays.Patches
                     CompatLog.Out(
                         $"[DeadAir] WanderingHorde SetNextTime: worldTime={now} vanillaHordeNext={vanillaHordeNext} " +
                         $"adjustedHordeNext={adjustedHordeNext} spanWas={span} spanNow={newSpan} " +
-                        $"mult={DeadAirWanderingHordeTunables.HordeFrequencyMultiplier} spawnType={_spawnType}");
+                        $"mult={DeadAirWanderingHordeTunables.HordeFrequencyMultiplier} spawnType={spawnTypeName}");
                 }
             }
             catch (Exception ex)
@@ -187,7 +226,6 @@ namespace DeadAir_7LongDarkDays.Patches
             return Convert.ToUInt64(value);
         }
     }
-
     [HarmonyPatch(typeof(AIDirectorGameStagePartySpawner), nameof(AIDirectorGameStagePartySpawner.SetupGroup))]
     public static class DeadAirWanderingHordeSetupGroupPatch
     {

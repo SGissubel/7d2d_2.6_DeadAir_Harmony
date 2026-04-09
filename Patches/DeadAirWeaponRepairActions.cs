@@ -42,7 +42,7 @@ namespace DeadAir_7LongDarkDays.Patches
           }
       }
 
-      static int CountPlayerItem(EntityPlayerLocal player, string itemName)
+      internal static int CountPlayerItem(EntityPlayerLocal player, string itemName)
       {
           if (player == null || string.IsNullOrEmpty(itemName))
           {
