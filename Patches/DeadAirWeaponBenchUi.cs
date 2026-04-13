@@ -1,6 +1,7 @@
-using HarmonyLib;
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 
 namespace DeadAir_7LongDarkDays.Patches
@@ -26,7 +27,6 @@ namespace DeadAir_7LongDarkDays.Patches
         {
             CompatLog.Error($"[DeadAirWeaponBench] {message}");
         }
-        
     }
 
     public static class DeadAirWeaponBenchHelpers
@@ -82,12 +82,14 @@ namespace DeadAir_7LongDarkDays.Patches
             "IZYgunT2LGLChinalakeGrenadeLauncher"
         };
 
+        private static readonly HashSet<XUiController> HiddenForBench = new HashSet<XUiController>();
+
         public static bool IsSupportedWeapon(string itemName)
         {
             return !string.IsNullOrEmpty(itemName) && SupportedWeapons.Contains(itemName);
         }
 
-        /// <summary>Supported ranged weapon that is a firearm.</summary>
+        /// <summary>Alias for older branches; same as <see cref="IsSupportedWeapon"/>.</summary>
         public static bool IsFirearmSupportedWeapon(string itemName)
         {
             return IsSupportedWeapon(itemName);
@@ -97,77 +99,58 @@ namespace DeadAir_7LongDarkDays.Patches
         {
             switch (itemName)
             {
-                // -------------------------
                 // Handguns / SMGs / pistol-family IZY
-                // -------------------------
                 case "gunHandgunT1Pistol":
                 case "gunHandgunT3SMG5":
                 case "gunHandgunT2Magnum44":
                 case "gunHandgunT3DesertVulture":
                 case "IZYgunT0PistolLiberatorImprovisedPistol":
                 case "IZYgunT1Pistol9Makarov":
-                
                 case "IZYgunT2Pistol45M1911A1":
-                case "IZYgunT3Pistol45USP45":              
+                case "IZYgunT3Pistol45USP45":
                     return "gunHandgunT1PistolParts";
 
-                // -------------------------
                 // Primitive / improvised IZY handgun-family
-                // -------------------------
-                
                 case "IZYgunT0SMGPIPEsubmachinegun":
                     return "resourceMetalPipe";
 
-                // -------------------------
                 // Shotguns
-                // -------------------------
                 case "gunShotgunT1DoubleBarrel":
                 case "gunShotgunT2PumpShotgun":
                 case "gunShotgunT3AutoShotgun":
-
                 case "IZYgunT2TradshotgunLeveractionShotgunModel1887":
                 case "IZYgunT4TACshotgunM1014":
                     return "gunShotgunT1DoubleBarrelParts";
 
-                // -------------------------
                 // Rifles / marksman rifles
-                // -------------------------
                 case "gunRifleT1HuntingRifle":
                 case "gunRifleT2LeverActionRifle":
                 case "gunRifleT3SniperRifle":
-
                 case "IZYgunT1SNIPERRIFLE762Mosinnagant":
                 case "IZYgunT3MarksManRifle762HKPSG1":
                 case "IZYgunT3MarksmanRifleMMRM1Carbine45":
                 case "IZYgunT4MarksmanRifle45MMRKrissVectorCarbine":
                     return "gunRifleT1HuntingRifleParts";
 
-                // -------------------------
                 // AR / MG family
-                // -------------------------
                 case "gunMGT1AK47":
                 case "gunMGT2TacticalAR":
                 case "gunMGT3M60":
                 case "IZYgunT145TACSMGMAC10":
                 case "IZYgunT445TACSMGKrissSuperV":
                 case "IZYgunT4SMGCZScorpionEVO3":
-
                 case "IZYgunT2ARSTG44N":
                 case "IZYgunT3BattleRifleHKG3":
                 case "IZYgunT3BULLPUPHellionVHS2":
                 case "IZYgunT4ARCabineHK416":
                     return "gunMGT1AK47Parts";
 
-                // -------------------------
                 // Explosive launcher family
-                // -------------------------
                 case "gunExplosivesT3RocketLauncher":
                 case "IZYgunT2LGLChinalakeGrenadeLauncher":
                     return "gunExplosivesT3RocketLauncherParts";
 
-                // -------------------------
                 // Bows / crossbows
-                // -------------------------
                 case "gunBowT1WoodenBow":
                 case "gunBowT3CompoundBow":
                 case "gunBowT1IronCrossbow":
@@ -276,6 +259,10 @@ namespace DeadAir_7LongDarkDays.Patches
             }
         }
 
+        /// <summary>
+        /// Hide shared info/inspect controllers while weapon bench is open.
+        /// We keep dormancy enabled because this is what prevents the overlay from sitting on top of the backpack.
+        /// </summary>
         public static void HideController(XUiController controller, bool makeDormant)
         {
             if (controller == null)
@@ -285,6 +272,8 @@ namespace DeadAir_7LongDarkDays.Patches
 
             try
             {
+                HiddenForBench.Add(controller);
+
                 if (controller.ViewComponent != null)
                 {
                     controller.ViewComponent.IsVisible = false;
@@ -297,44 +286,244 @@ namespace DeadAir_7LongDarkDays.Patches
                     controller.IsDormant = true;
                 }
 
-                if (controller.ViewComponent != null)
-                {
-                    var tr = Traverse.Create(controller.ViewComponent);
-
-                    try
-                    {
-                        var go = tr.Property("gameObject").GetValue() as GameObject
-                            ?? tr.Field("gameObject").GetValue() as GameObject;
-
-                        if (go != null)
-                        {
-                            go.SetActive(false);
-                        }
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-
-                    try
-                    {
-                        var tf = tr.Property("transform").GetValue() as Transform
-                            ?? tr.Field("transform").GetValue() as Transform;
-
-                        if (tf != null && tf.gameObject != null)
-                        {
-                            tf.gameObject.SetActive(false);
-                        }
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-                }
+                DeactivateControllerView(controller);
             }
             catch (Exception ex)
             {
                 DeadAirWeaponBenchDebug.Warn($"HideController failed for {controller.GetType().FullName}: {ex}");
+            }
+        }
+
+        public static void RestoreHiddenControllers(XUi xui)
+        {
+            if (HiddenForBench.Count == 0)
+            {
+                return;
+            }
+
+            var toRestore = new List<XUiController>(HiddenForBench);
+
+            foreach (var controller in toRestore)
+            {
+                try
+                {
+                    if (controller == null)
+                    {
+                        continue;
+                    }
+
+                    if (xui != null && controller.xui != xui)
+                    {
+                        continue;
+                    }
+
+                    controller.IsDormant = false;
+                    controller.IsDirty = true;
+
+                    if (controller.ViewComponent != null)
+                    {
+                        controller.ViewComponent.IsVisible = true;
+                    }
+
+                    ActivateControllerView(controller);
+                    TryRefreshController(controller);
+
+                    HiddenForBench.Remove(controller);
+                    DeadAirWeaponBenchDebug.Log($"Restored hidden controller: {controller.GetType().FullName}");
+                }
+                catch (Exception ex)
+                {
+                    DeadAirWeaponBenchDebug.Warn($"RestoreHiddenControllers failed: {ex}");
+                }
+            }
+        }
+
+        static void DeactivateControllerView(XUiController controller)
+        {
+            if (controller?.ViewComponent == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var tr = Traverse.Create(controller.ViewComponent);
+
+                try
+                {
+                    var go = tr.Property("gameObject").GetValue() as GameObject
+                        ?? tr.Field("gameObject").GetValue() as GameObject;
+
+                    if (go != null)
+                    {
+                        go.SetActive(false);
+                    }
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    var tf = tr.Property("transform").GetValue() as Transform
+                        ?? tr.Field("transform").GetValue() as Transform;
+
+                    if (tf != null && tf.gameObject != null)
+                    {
+                        tf.gameObject.SetActive(false);
+                    }
+                }
+                catch
+                {
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        static void ActivateControllerView(XUiController controller)
+        {
+            if (controller?.ViewComponent == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var tr = Traverse.Create(controller.ViewComponent);
+
+                try
+                {
+                    var go = tr.Property("gameObject").GetValue() as GameObject
+                        ?? tr.Field("gameObject").GetValue() as GameObject;
+
+                    if (go != null)
+                    {
+                        go.SetActive(true);
+                    }
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    var tf = tr.Property("transform").GetValue() as Transform
+                        ?? tr.Field("transform").GetValue() as Transform;
+
+                    if (tf != null && tf.gameObject != null)
+                    {
+                        tf.gameObject.SetActive(true);
+                    }
+                }
+                catch
+                {
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        static void TryRefreshController(XUiController controller)
+        {
+            if (controller == null)
+            {
+                return;
+            }
+
+            foreach (var name in new[] { "Refresh", "RefreshData", "UpdateData", "RefreshBindings" })
+            {
+                try
+                {
+                    var mi = controller.GetType().GetMethod(
+                        name,
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        Type.EmptyTypes,
+                        null);
+
+                    if (mi != null)
+                    {
+                        mi.Invoke(controller, null);
+                        return;
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(XUiC_WorkstationWindowGroup), "OnClose")]
+    public static class DeadAirWeaponBench_RestoreInfoWindows_OnClose
+    {
+        public static void Prefix(XUiC_WorkstationWindowGroup __instance)
+        {
+            try
+            {
+                if (!DeadAirWeaponBenchHelpers.IsWeaponRepairBench(__instance))
+                {
+                    return;
+                }
+
+                DeadAirWeaponBenchHelpers.RestoreHiddenControllers(__instance.xui);
+                DeadAirWeaponBenchDebug.Log("Weapon bench closing: restored hidden shared info controllers.");
+            }
+            catch (Exception ex)
+            {
+                DeadAirWeaponBenchDebug.Warn($"RestoreInfoWindows_OnClose failed: {ex}");
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(XUiC_EmptyInfoWindow), "OnOpen")]
+    public static class DeadAirWeaponBench_HideEmptyInfo_OnOpen
+    {
+        public static void Postfix(XUiC_EmptyInfoWindow __instance)
+        {
+            try
+            {
+                if (__instance?.xui == null || !DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(__instance.xui))
+                {
+                    return;
+                }
+
+                DeadAirWeaponBenchHelpers.HideController(__instance, true);
+                DeadAirWeaponBenchDebug.Log("Suppressed EmptyInfoWindow OnOpen while weapon bench is open.");
+            }
+            catch (Exception ex)
+            {
+                DeadAirWeaponBenchDebug.Warn($"HideEmptyInfo_OnOpen failed: {ex}");
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(XUiController), "OnOpen")]
+    public static class DeadAirWeaponBench_HideItemInfoViaBaseOnOpen
+    {
+        public static void Postfix(XUiController __instance)
+        {
+            try
+            {
+                if (!(__instance is XUiC_ItemInfoWindow))
+                {
+                    return;
+                }
+
+                if (__instance.xui == null || !DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(__instance.xui))
+                {
+                    return;
+                }
+
+                DeadAirWeaponBenchHelpers.HideController(__instance, true);
+                DeadAirWeaponBenchDebug.Log("Suppressed ItemInfoWindow via XUiController.OnOpen while weapon bench is open.");
+            }
+            catch (Exception ex)
+            {
+                DeadAirWeaponBenchDebug.Warn($"HideItemInfoViaBaseOnOpen failed: {ex}");
             }
         }
     }
@@ -431,56 +620,6 @@ namespace DeadAir_7LongDarkDays.Patches
         }
     }
 
-    [HarmonyPatch(typeof(XUiC_EmptyInfoWindow), "OnOpen")]
-    public static class DeadAirWeaponBench_HideEmptyInfo_OnOpen
-    {
-        public static void Postfix(XUiC_EmptyInfoWindow __instance)
-        {
-            try
-            {
-                if (__instance?.xui == null || !DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(__instance.xui))
-                {
-                    return;
-                }
-
-                DeadAirWeaponBenchHelpers.HideController(__instance, true);
-                DeadAirWeaponBenchDebug.Log("Suppressed EmptyInfoWindow OnOpen while weapon bench is open.");
-            }
-            catch (Exception ex)
-            {
-                DeadAirWeaponBenchDebug.Warn($"HideEmptyInfo_OnOpen failed: {ex}");
-            }
-        }
-    }
-    [HarmonyPatch(typeof(XUiC_ItemInfoWindow), "OnOpen")]
-
-    [HarmonyPatch(typeof(XUiController), "OnOpen")]
-    public static class DeadAirWeaponBench_HideItemInfoViaBaseOnOpen
-    {
-        public static void Postfix(XUiController __instance)
-        {
-            try
-            {
-                if (__instance == null || !(__instance is XUiC_ItemInfoWindow))
-                {
-                    return;
-                }
-
-                if (__instance.xui == null || !DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(__instance.xui))
-                {
-                    return;
-                }
-
-                DeadAirWeaponBenchHelpers.HideController(__instance, true);
-                DeadAirWeaponBenchDebug.Log("Suppressed ItemInfoWindow via XUiController.OnOpen while weapon bench is open.");
-            }
-            catch (Exception ex)
-            {
-                DeadAirWeaponBenchDebug.Warn($"HideItemInfoViaBaseOnOpen failed: {ex}");
-            }
-        }
-    }
-
     [HarmonyPatch(typeof(XUiController), "OnOpen")]
     public static class DeadAirWeaponBench_LogOpenedControllers_OnOpen
     {
@@ -506,8 +645,6 @@ namespace DeadAir_7LongDarkDays.Patches
                 var groupId = __instance.windowGroup?.ID ?? "<null>";
                 var groupType = __instance.windowGroup?.GetType().FullName ?? "<null>";
 
-                // Keep this targeted: log only likely center/info/inventory-related windows,
-                // plus anything with suspicious names that may be our inspect blocker.
                 var combined = $"{typeName} | name={controllerName} | id={controllerId} | group={groupId}";
                 if (!LooksRelevant(combined))
                 {

@@ -28,9 +28,7 @@ namespace DeadAir_7LongDarkDays.Patches
             {
                 if (FieldTheEntity == null || FieldEntityTarget == null)
                 {
-                    CompatLog.Error(
-                        $"[GetMoveToLocation] Field lookup failed. " +
-                        $"theEntityFound={FieldTheEntity != null} entityTargetFound={FieldEntityTarget != null}");
+
                     return;
                 }
 
@@ -71,17 +69,7 @@ namespace DeadAir_7LongDarkDays.Patches
 
                 bool directChaseApplied = false;
                 bool hardCloseApplied = false;
-                bool antiLineupApplied = false;
 
-                if (DebugGetMoveToLocation)
-                {
-                    CompatLog.Out(
-                        $"[GetMoveToLocation] Start " +
-                        $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                        $"target={target.EntityName}({target.entityId}) " +
-                        $"maxDist={maxDist:0.00} dist={dist:0.00} " +
-                        $"dy={dy:0.00} vanillaResult={FormatVec(__result)}");
-                }
 
                 // ------------------------------------------------------------
                 // 1) Direct chase base goal
@@ -109,14 +97,6 @@ namespace DeadAir_7LongDarkDays.Patches
                     baseGoal = predictedGoal;
                     directChaseApplied = true;
 
-                    if (DebugGetMoveToLocation)
-                    {
-                        CompatLog.Out(
-                            $"[DirectChase] Applied " +
-                            $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                            $"target={target.EntityName}({target.entityId}) " +
-                            $"predictedGoal={FormatVec(predictedGoal)}");
-                    }
                 }
 
                 // ------------------------------------------------------------
@@ -156,23 +136,6 @@ namespace DeadAir_7LongDarkDays.Patches
                         baseGoal = hardCloseGoal;
                         hardCloseApplied = true;
 
-                        if (DebugGetMoveToLocation)
-                        {
-                            CompatLog.Out(
-                                $"[HardClose] Applied " +
-                                $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                                $"target={target.EntityName}({target.entityId}) " +
-                                $"dist={dist:0.00} targetSpeed={targetSpeed:0.00} fleeDot={fleeDot:0.00} " +
-                                $"hardCloseGoal={FormatVec(hardCloseGoal)}");
-                        }
-                    }
-                    else if (DebugGetMoveToLocation)
-                    {
-                        CompatLog.Out(
-                            $"[HardClose] Skip " +
-                            $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                            $"inBand={inHardCloseBand} playerIsFleeing={playerIsFleeing} " +
-                            $"targetSpeed={targetSpeed:0.00} fleeDot={fleeDot:0.00}");
                     }
                 }
 
@@ -217,39 +180,12 @@ namespace DeadAir_7LongDarkDays.Patches
                     adjusted = target.world.FindSupportingBlockPos(adjusted);
 
                     baseGoal = adjusted;
-                    antiLineupApplied = true;
 
-                    if (DebugGetMoveToLocation)
-                    {
-                      CompatLog.Out(
-                          $"[AntiLineup] Applied " +
-                          $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                          $"side={(side < 0f ? "LEFT" : "RIGHT")} " +
-                          $"stable01={stable01:0.000} " +
-                          $"lateralAmount={lateralAmount:0.000} radialJitter={radialJitter:0.000} " +
-                          $"directChaseApplied={directChaseApplied} hardCloseApplied={hardCloseApplied} " +
-                          $"adjustedGoal={FormatVec(adjusted)}");
-                      }
                 }
-                else if (DebugGetMoveToLocation)
-                {
-                    CompatLog.Out(
-                        $"[AntiLineup] Skip distance band " +
-                        $"zombie={zombie.EntityName}({zombie.entityId}) dist={dist:0.00} required=1.35..8.50");
-                }
+
 
                 __result = baseGoal;
 
-                if (DebugGetMoveToLocation)
-                {
-                    CompatLog.Out(
-                        $"[GetMoveToLocation] Final " +
-                        $"zombie={zombie.EntityName}({zombie.entityId}) " +
-                        $"directChaseApplied={directChaseApplied} " +
-                        $"hardCloseApplied={hardCloseApplied} " +
-                        $"antiLineupApplied={antiLineupApplied} " +
-                        $"finalGoal={FormatVec(__result)}");
-                }
             }
             catch (System.Exception ex)
             {

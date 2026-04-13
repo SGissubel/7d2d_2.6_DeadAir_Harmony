@@ -149,7 +149,7 @@ namespace DeadAir_7LongDarkDays.Patches
                 }
                 else
                 {
-                    outdoorShockStage = 1;
+                    outdoorShockStage = 0;
                 }
             }
             else
@@ -165,7 +165,7 @@ namespace DeadAir_7LongDarkDays.Patches
                 }
                 else
                 {
-                    residualStage = 1;
+                    residualStage = 0;
                 }
             }
             // Heat offsets: torch helps, fire helps a lot more, but neither should fully erase wet cold outside.

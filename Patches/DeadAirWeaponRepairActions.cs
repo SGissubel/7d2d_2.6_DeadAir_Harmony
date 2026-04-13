@@ -8,537 +8,848 @@ namespace DeadAir_7LongDarkDays.Patches
 {
     public static class DeadAirWeaponRepairActions
     {
-      static void ReturnLegacyHiddenToolSlotsToPlayer(EntityPlayerLocal player, ItemStack[] tools)
-      {
-          if (tools == null || tools.Length < 2 || player == null)
-          {
-              return;
-          }
-
-          for (int i = 1; i < tools.Length; i++)
-          {
-              try
-              {
-                  if (tools[i].IsEmpty())
-                  {
-                      continue;
-                  }
-
-                  var copy = new ItemStack(tools[i].itemValue.Clone(), tools[i].count);
-                  if (TryAddStackToPlayer(player, copy))
-                  {
-                      CompatLog.Out($"[DeadAirRepair] Returned legacy hidden tool slot item to player from slot index={i}: {GetStackName(copy)} x{copy.count}");
-                      tools[i].Clear();
-                  }
-                  else
-                  {
-                      CompatLog.Out($"[DeadAirRepair] Could not return legacy hidden tool slot item to player from slot index={i}");
-                  }
-              }
-              catch (Exception ex)
-              {
-                  CompatLog.Out($"[DeadAirRepair] ReturnLegacyHiddenToolSlotsToPlayer slot={i}: {ex.Message}");
-              }
-          }
-      }
-
-      /// <summary>Preferred: uses live <see cref="Inventory"/> slots. Falls back to reflection scan if needed.</summary>
-      internal static int CountPlayerItem(EntityPlayerLocal player, string itemName)
-      {
-          return DeadAirInventoryItemRemoval.CountNamedItem(player, itemName);
-      }
-
-      /// <summary>Fallback when <see cref="Inventory.GetItem"/> is unavailable.</summary>
-      internal static int CountPlayerItemLegacy(EntityPlayerLocal player, string itemName)
-      {
-          if (player == null || string.IsNullOrEmpty(itemName))
-          {
-              return 0;
-          }
-
-          int total = 0;
-          foreach (var arr in EnumeratePlayerItemStackArrays(player))
-          {
-              if (arr == null)
-              {
-                  continue;
-              }
-
-              for (int i = 0; i < arr.Length; i++)
-              {
-                  try
-                  {
-                      var s = arr[i];
-                      if (s.IsEmpty() || s.itemValue.ItemClass == null)
-                      {
-                          continue;
-                      }
-
-                      if (string.Equals(s.itemValue.ItemClass.Name, itemName, StringComparison.OrdinalIgnoreCase))
-                      {
-                          total += s.count;
-                      }
-                  }
-                  catch
-                  {
-                  }
-              }
-          }
-
-          return total;
-      }
-
-      internal static bool RemovePlayerItems(EntityPlayerLocal player, string itemName, int count)
-      {
-          return DeadAirInventoryItemRemoval.TryRemoveNamedItem(player, itemName, count);
-      }
-
-      internal static bool RemovePlayerItemsLegacy(EntityPlayerLocal player, string itemName, int count)
-      {
-          if (player == null || string.IsNullOrEmpty(itemName) || count <= 0)
-          {
-              return false;
-          }
-
-          int remaining = count;
-
-          foreach (var arr in EnumeratePlayerItemStackArrays(player))
-          {
-              if (arr == null)
-              {
-                  continue;
-              }
-
-              for (int i = 0; i < arr.Length && remaining > 0; i++)
-              {
-                  try
-                  {
-                      var s = arr[i];
-                      if (s.IsEmpty() || s.itemValue.ItemClass == null)
-                      {
-                          continue;
-                      }
-
-                      if (!string.Equals(s.itemValue.ItemClass.Name, itemName, StringComparison.OrdinalIgnoreCase))
-                      {
-                          continue;
-                      }
-
-                      int take = s.count < remaining ? s.count : remaining;
-                      s.count -= take;
-                      remaining -= take;
-
-                      if (s.count <= 0)
-                      {
-                          s.Clear();
-                      }
-
-                      arr[i] = s;
-                  }
-                  catch
-                  {
-                  }
-              }
-
-              if (remaining <= 0)
-              {
-                  break;
-              }
-          }
-
-          if (remaining > 0)
-          {
-              CompatLog.Out($"[DeadAirRepair] RemovePlayerItems incomplete. requested={count}, removed={count - remaining}, item={itemName}");
-              return false;
-          }
-
-          TryMarkPlayerContainersDirty(player);
-          return true;
-      }
-
-      static IEnumerable<ItemStack[]> EnumeratePlayerItemStackArrays(EntityPlayerLocal player)
-      {
-          if (player == null)
-          {
-              yield break;
-          }
-
-          var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-
-          foreach (var rootName in new[] { "inventory", "bag", "backpack", "lootContainer", "equipment" })
-          {
-              object root = null;
-
-              try
-              {
-                  root = GetMemberValue(player, rootName);
-              }
-              catch
-              {
-              }
-
-              if (root == null)
-              {
-                  continue;
-              }
-
-              foreach (var arr in EnumerateItemStackArraysRecursive(root, 0, 4, seen))
-              {
-                  yield return arr;
-              }
-          }
-      }
-
-      static IEnumerable<ItemStack[]> EnumerateItemStackArraysRecursive(object obj, int depth, int maxDepth, HashSet<object> seen)
-      {
-          if (obj == null || depth > maxDepth)
-          {
-              yield break;
-          }
-
-          if (!obj.GetType().IsValueType)
-          {
-              if (!seen.Add(obj))
-              {
-                  yield break;
-              }
-          }
-
-          if (obj is ItemStack[] direct)
-          {
-              yield return direct;
-              yield break;
-          }
-
-          var type = obj.GetType();
-
-          while (type != null && type != typeof(object))
-          {
-              foreach (var f in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-              {
-                  object val = null;
-
-                  try
-                  {
-                      val = f.GetValue(obj);
-                  }
-                  catch
-                  {
-                  }
-
-                  if (val == null)
-                  {
-                      continue;
-                  }
-
-                  if (val is ItemStack[] arr)
-                  {
-                      yield return arr;
-                      continue;
-                  }
-
-                  if (LooksLikePlayerContainerMember(f.Name, f.FieldType))
-                  {
-                      foreach (var childArr in EnumerateItemStackArraysRecursive(val, depth + 1, maxDepth, seen))
-                      {
-                          yield return childArr;
-                      }
-                  }
-              }
-
-              foreach (var p in type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-              {
-                  if (!p.CanRead || p.GetIndexParameters().Length > 0)
-                  {
-                      continue;
-                  }
-
-                  object val = null;
-
-                  try
-                  {
-                      val = p.GetValue(obj, null);
-                  }
-                  catch
-                  {
-                  }
-
-                  if (val == null)
-                  {
-                      continue;
-                  }
-
-                  if (val is ItemStack[] arr)
-                  {
-                      yield return arr;
-                      continue;
-                  }
-
-                  if (LooksLikePlayerContainerMember(p.Name, p.PropertyType))
-                  {
-                      foreach (var childArr in EnumerateItemStackArraysRecursive(val, depth + 1, maxDepth, seen))
-                      {
-                          yield return childArr;
-                      }
-                  }
-              }
-
-              type = type.BaseType;
-          }
-      }
-
-      static bool LooksLikePlayerContainerMember(string memberName, Type memberType)
-      {
-          string n = memberName ?? string.Empty;
-          string t = memberType?.FullName ?? string.Empty;
-
-          return ContainsIgnoreCase(n, "slot", "item", "stack", "bag", "backpack", "inventory", "toolbelt", "container")
-              || ContainsIgnoreCase(t, "ItemStack", "ItemValue", "Inventory", "Bag", "Backpack", "Container");
-      }
-
-      static void TryMarkPlayerContainersDirty(EntityPlayerLocal player)
-      {
-          if (player == null)
-          {
-              return;
-          }
-
-          foreach (var rootName in new[] { "inventory", "bag", "backpack" })
-          {
-              object root = null;
-
-              try
-              {
-                  root = GetMemberValue(player, rootName);
-              }
-              catch
-              {
-              }
-
-              if (root == null)
-              {
-                  continue;
-              }
-
-              foreach (var methodName in new[] { "SetModified", "SetDirty", "MarkChanged", "OnChanged", "Changed" })
-              {
-                  TryInvokeNoArg(root, methodName);
-              }
-          }
-      }
-
-      static bool TryAddStackToPlayer(EntityPlayerLocal player, ItemStack stack)
-      {
-          if (player == null || stack.IsEmpty())
-          {
-              return false;
-          }
-
-          try
-          {
-              var inv = GetMemberValue(player, "inventory");
-              if (inv != null)
-              {
-                  foreach (var name in new[] { "AddItem", "AddItemStack", "AddItemNotEmpty" })
-                  {
-                      var mi = inv.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(ItemStack) }, null);
-                      if (mi != null)
-                      {
-                          mi.Invoke(inv, new object[] { stack });
-                          return true;
-                      }
-                  }
-              }
-          }
-          catch
-          {
-          }
-
-          try
-          {
-              var bag = GetMemberValue(player, "bag");
-              if (bag != null)
-              {
-                  var mi = bag.GetType().GetMethod("AddItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(ItemStack) }, null);
-                  if (mi != null)
-                  {
-                      mi.Invoke(bag, new object[] { stack });
-                      return true;
-                  }
-              }
-          }
-          catch
-          {
-          }
-
-          return false;
-      }
-
-      sealed class ReferenceEqualityComparer : IEqualityComparer<object>
-      {
-          public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
-
-          public new bool Equals(object x, object y)
-          {
-              return ReferenceEquals(x, y);
-          }
-
-          public int GetHashCode(object obj)
-          {
-              return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
-          }
-      }
-      public static void TryRepairFromUiButton(XUiC_SimpleButton button)
-      {
-          var btnId = DeadAirGameApiCompat.TryGetXUiControlName(button);
-          if (button == null || !string.Equals(btnId, "btnDeadAirWeaponRepair", StringComparison.OrdinalIgnoreCase))
-          {
-              return;
-          }
-
-          CompatLog.Out("[DeadAirRepair] Repair button hit via XUiC_SimpleButton.Btn_OnPress");
-
-          if (!DeadAirWeaponRepairState.TryBeginRepairClick())
-          {
-              return;
-          }
-
-          var player = button?.xui?.playerUI?.entityPlayer as EntityPlayerLocal
-              ?? GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
-          if (player == null)
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: no local player from bench UI / primary player");
-              return;
-          }
-
-          var te = ResolveBenchFromButton(button);
-          if (te == null)
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: no active weapon repair bench resolved from button context");
-              DeadAirNotify.Msg(player, "deadairRepairNoBench");
-              return;
-          }
-
-          if (!IsWeaponBenchButtonContext(button))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: button context is not the DeadAir weapon repair bench");
-              DeadAirNotify.Msg(player, "deadairRepairNoBench");
-              return;
-          }
-
-          var tools = TryGetToolStacks(te);
-          if (tools == null || tools.Length < 1)
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: tool slots missing");
-              DeadAirNotify.Msg(player, "deadairRepairBadSlots");
-              return;
-          }
-
-          var weapon = tools[0];
-
-          CompatLog.Out($"[DeadAirRepair] BEFORE weapon={GetStackName(weapon)} useTimes={GetUseTimesSafe(weapon.itemValue)} count={weapon.count}");
-
-          if (weapon.IsEmpty() || weapon.itemValue.ItemClass == null)
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: weapon slot empty");
-              DeadAirNotify.Msg(player, "deadairRepairNeedWeapon");
-              return;
-          }
-
-          var weaponClass = weapon.itemValue.ItemClass;
-          CompatLog.Out($"[DeadAirRepair] weaponClass={weaponClass?.Name}");
-
-          if (weaponClass == null || !DeadAirWeaponBenchHelpers.IsSupportedWeapon(weaponClass.Name))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: unsupported or invalid weapon");
-              DeadAirNotify.Msg(player, "deadairRepairNotWeapon");
-              return;
-          }
-
-          if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(weaponClass.Name))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: bench refurb is for firearms only (not bows/crossbows)");
-              DeadAirNotify.Msg(player, "deadairRepairBenchFirearmsOnly");
-              return;
-          }
-
-          var requiredPartsName = DeadAirWeaponBenchHelpers.GetRepairPartName(weaponClass.Name);
-          if (string.IsNullOrEmpty(requiredPartsName))
-          {
-              CompatLog.Out($"[DeadAirRepair] FAIL: no required parts mapping for weapon={weaponClass.Name}");
-              DeadAirNotify.Msg(player, "deadairRepairWrongParts");
-              return;
-          }
-
-          int need = DeadAirWeaponBenchHelpers.GetQualityScaledPartCount(weapon.itemValue);
-
-          if (IsFullyRepaired(weapon.itemValue))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: weapon already fully repaired");
-              DeadAirNotify.Msg(player, "deadairRepairAlreadyFull");
-              return;
-          }
-
-          ReturnLegacyHiddenToolSlotsToPlayer(player, tools);
-
-          int availableKits = CountPlayerItem(player, DeadAirWeaponRepairState.RepairKitName);
-          if (availableKits < 1)
-          {
-              CompatLog.Out($"[DeadAirRepair] FAIL: repair kit missing in player inventory. have={availableKits}");
-              DeadAirNotify.Msg(player, "deadairRepairNeedKit");
-              return;
-          }
-
-          int availableParts = CountPlayerItem(player, requiredPartsName);
-          if (availableParts < need)
-          {
-              CompatLog.Out($"[DeadAirRepair] FAIL: not enough matching parts in player inventory. need={need}, have={availableParts}, part={requiredPartsName}");
-              DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
-              return;
-          }
-
-          if (!RemovePlayerItems(player, DeadAirWeaponRepairState.RepairKitName, 1))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: could not remove repair kit from player inventory");
-              DeadAirNotify.Msg(player, "deadairRepairNeedKit");
-              return;
-          }
-
-          if (!RemovePlayerItems(player, requiredPartsName, need))
-          {
-              CompatLog.Out("[DeadAirRepair] FAIL: could not remove required parts from player inventory after validation");
-              DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
-              return;
-          }
-
-          var repaired = weapon.itemValue;
-          ApplyFullRepair(ref repaired);
-          weapon.itemValue = repaired;
-
-          tools[0] = weapon;
-
-          if (tools.Length > 1)
-          {
-              tools[1].Clear();
-          }
-
-          if (tools.Length > 2)
-          {
-              tools[2].Clear();
-          }
-
-          CompatLog.Out($"[DeadAirRepair] AFTER weapon={GetStackName(tools[0])} useTimes={GetUseTimesSafe(tools[0].itemValue)} count={tools[0].count}");
-
-          bool wroteBack = TrySetToolStacks(te, tools);
-          CompatLog.Out($"[DeadAirRepair] writeBack={wroteBack}");
-
-          TrySyncUiWorkstationModel(button, tools);
-          TryRefreshBenchState(te, button);
-          LogPostWriteToolStacksDiagnostics(te, button);
-
-          CompatLog.Out($"[DeadAirRepair] SUCCESS: weapon={weaponClass.Name}, quality={weapon.itemValue.Quality}, partsUsed={need}, source=playerInventory");
-          DeadAirNotify.Msg(player, "deadairRepairSuccess");
-      }
+        static void ReturnLegacyHiddenToolSlotsToPlayer(EntityPlayerLocal player, ItemStack[] tools)
+        {
+            if (tools == null || tools.Length < 2 || player == null)
+            {
+                return;
+            }
+
+            for (int i = 1; i < tools.Length; i++)
+            {
+                try
+                {
+                    if (tools[i].IsEmpty())
+                    {
+                        continue;
+                    }
+
+                    var copy = new ItemStack(tools[i].itemValue.Clone(), tools[i].count);
+                    if (TryAddStackToPlayer(player, copy))
+                    {
+                        CompatLog.Out($"[DeadAirRepair] Returned legacy hidden tool slot item to player from slot index={i}: {GetStackName(copy)} x{copy.count}");
+                        tools[i].Clear();
+                    }
+                    else
+                    {
+                        CompatLog.Out($"[DeadAirRepair] Could not return legacy hidden tool slot item to player from slot index={i}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CompatLog.Out($"[DeadAirRepair] ReturnLegacyHiddenToolSlotsToPlayer slot={i}: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>Preferred: uses live <see cref="Inventory"/> slots. Falls back to reflection scan if needed.</summary>
+        internal static int CountPlayerItem(EntityPlayerLocal player, string itemName)
+        {
+            return DeadAirInventoryItemRemoval.CountNamedItem(player, itemName);
+        }
+
+        static void TryRefreshPlayerBackpackUi(XUi xui)
+        {
+            if (xui == null)
+            {
+                return;
+            }
+
+            try
+            {
+                object backpackGroupObj = xui.FindWindowGroupByName("backpack");
+                if (backpackGroupObj == null)
+                {
+                    CompatLog.Out("[DeadAirRepair] TryRefreshPlayerBackpackUi: backpack group not found");
+                    return;
+                }
+
+                XUiController rootController =
+                    backpackGroupObj as XUiController
+                    ?? TryGetControllerFromWindowGroup(backpackGroupObj);
+
+                if (rootController == null)
+                {
+                    CompatLog.Out($"[DeadAirRepair] TryRefreshPlayerBackpackUi: backpack controller not found (groupType={backpackGroupObj.GetType().FullName})");
+                    return;
+                }
+
+                CompatLog.Out($"[DeadAirRepair] TryRefreshPlayerBackpackUi: root controller type={rootController.GetType().FullName}");
+                RefreshControllerRecursive(rootController);
+            }
+            catch (Exception ex)
+            {
+                CompatLog.Out($"[DeadAirRepair] TryRefreshPlayerBackpackUi failed: {ex.Message}");
+            }
+        }
+
+        static XUiController TryGetControllerFromWindowGroup(object groupObj)
+        {
+            if (groupObj == null)
+            {
+                return null;
+            }
+
+            var tr = Traverse.Create(groupObj);
+
+            try
+            {
+                var p = tr.Property("Controller");
+                if (p.PropertyExists())
+                {
+                    return p.GetValue() as XUiController;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var f = tr.Field("controller");
+                if (f.FieldExists())
+                {
+                    return f.GetValue() as XUiController;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var f = tr.Field("Controller");
+                if (f.FieldExists())
+                {
+                    return f.GetValue() as XUiController;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        static void RefreshControllerRecursive(XUiController controller)
+        {
+            if (controller == null)
+            {
+                return;
+            }
+
+            try
+            {
+                controller.IsDirty = true;
+            }
+            catch
+            {
+            }
+
+            foreach (var methodName in new[] { "Refresh", "RefreshData", "UpdateData", "RefreshBindings", "ForceRefreshItemStack" })
+            {
+                try
+                {
+                    var mi = controller.GetType().GetMethod(
+                        methodName,
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        Type.EmptyTypes,
+                        null);
+
+                    if (mi != null)
+                    {
+                        mi.Invoke(controller, null);
+                        break;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            CompatLog.Out($"[DeadAirRepair] Refreshed controller: {controller.GetType().FullName}");
+
+            foreach (var child in EnumerateChildControllers(controller))
+            {
+                RefreshControllerRecursive(child);
+            }
+        }
+
+        static IEnumerable<XUiController> EnumerateChildControllers(XUiController controller)
+        {
+            if (controller == null)
+            {
+                yield break;
+            }
+
+            object childrenObj = null;
+
+            try
+            {
+                childrenObj = Traverse.Create(controller).Property("Children").GetValue();
+            }
+            catch
+            {
+            }
+
+            if (childrenObj == null)
+            {
+                try
+                {
+                    childrenObj = Traverse.Create(controller).Field("children").GetValue();
+                }
+                catch
+                {
+                }
+            }
+
+            if (childrenObj is System.Collections.IEnumerable enumerable)
+            {
+                foreach (var obj in enumerable)
+                {
+                    if (obj is XUiController child)
+                    {
+                        yield return child;
+                    }
+                }
+            }
+        }
+
+        internal static int CountPlayerItemLegacy(EntityPlayerLocal player, string itemName)
+        {
+            if (player == null || string.IsNullOrEmpty(itemName))
+            {
+                return 0;
+            }
+
+            int total = 0;
+            foreach (var arr in EnumeratePlayerItemStackArrays(player))
+            {
+                if (arr == null)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    try
+                    {
+                        var s = arr[i];
+                        if (s.IsEmpty() || s.itemValue.ItemClass == null)
+                        {
+                            continue;
+                        }
+
+                        if (string.Equals(s.itemValue.ItemClass.Name, itemName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            total += s.count;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            return total;
+        }
+
+        internal static bool RemovePlayerItems(EntityPlayerLocal player, string itemName, int count)
+        {
+            return DeadAirInventoryItemRemoval.TryRemoveNamedItem(player, itemName, count);
+        }
+
+        internal static bool RemovePlayerItemsLegacy(EntityPlayerLocal player, string itemName, int count)
+        {
+            if (player == null || string.IsNullOrEmpty(itemName) || count <= 0)
+            {
+                return false;
+            }
+
+            int remaining = count;
+
+            foreach (var arr in EnumeratePlayerItemStackArrays(player))
+            {
+                if (arr == null)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < arr.Length && remaining > 0; i++)
+                {
+                    try
+                    {
+                        var s = arr[i];
+                        if (s.IsEmpty() || s.itemValue.ItemClass == null)
+                        {
+                            continue;
+                        }
+
+                        if (!string.Equals(s.itemValue.ItemClass.Name, itemName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        int take = s.count < remaining ? s.count : remaining;
+                        s.count -= take;
+                        remaining -= take;
+
+                        if (s.count <= 0)
+                        {
+                            s.Clear();
+                        }
+
+                        arr[i] = s;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (remaining <= 0)
+                {
+                    break;
+                }
+            }
+
+            if (remaining > 0)
+            {
+                CompatLog.Out($"[DeadAirRepair] RemovePlayerItems incomplete. requested={count}, removed={count - remaining}, item={itemName}");
+                return false;
+            }
+
+            TryMarkPlayerContainersDirty(player);
+            return true;
+        }
+
+        static IEnumerable<ItemStack[]> EnumeratePlayerItemStackArrays(EntityPlayerLocal player)
+        {
+            if (player == null)
+            {
+                yield break;
+            }
+
+            var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+
+            foreach (var rootName in new[] { "inventory", "bag", "backpack", "lootContainer", "equipment" })
+            {
+                object root = null;
+
+                try
+                {
+                    root = GetMemberValue(player, rootName);
+                }
+                catch
+                {
+                }
+
+                if (root == null)
+                {
+                    continue;
+                }
+
+                foreach (var arr in EnumerateItemStackArraysRecursive(root, 0, 4, seen))
+                {
+                    yield return arr;
+                }
+            }
+        }
+
+        static IEnumerable<ItemStack[]> EnumerateItemStackArraysRecursive(object obj, int depth, int maxDepth, HashSet<object> seen)
+        {
+            if (obj == null || depth > maxDepth)
+            {
+                yield break;
+            }
+
+            if (!obj.GetType().IsValueType)
+            {
+                if (!seen.Add(obj))
+                {
+                    yield break;
+                }
+            }
+
+            if (obj is ItemStack[] direct)
+            {
+                yield return direct;
+                yield break;
+            }
+
+            var type = obj.GetType();
+
+            while (type != null && type != typeof(object))
+            {
+                foreach (var f in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    object val = null;
+
+                    try
+                    {
+                        val = f.GetValue(obj);
+                    }
+                    catch
+                    {
+                    }
+
+                    if (val == null)
+                    {
+                        continue;
+                    }
+
+                    if (val is ItemStack[] arr)
+                    {
+                        yield return arr;
+                        continue;
+                    }
+
+                    if (LooksLikePlayerContainerMember(f.Name, f.FieldType))
+                    {
+                        foreach (var childArr in EnumerateItemStackArraysRecursive(val, depth + 1, maxDepth, seen))
+                        {
+                            yield return childArr;
+                        }
+                    }
+                }
+
+                foreach (var p in type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (!p.CanRead || p.GetIndexParameters().Length > 0)
+                    {
+                        continue;
+                    }
+
+                    object val = null;
+
+                    try
+                    {
+                        val = p.GetValue(obj, null);
+                    }
+                    catch
+                    {
+                    }
+
+                    if (val == null)
+                    {
+                        continue;
+                    }
+
+                    if (val is ItemStack[] arr)
+                    {
+                        yield return arr;
+                        continue;
+                    }
+
+                    if (LooksLikePlayerContainerMember(p.Name, p.PropertyType))
+                    {
+                        foreach (var childArr in EnumerateItemStackArraysRecursive(val, depth + 1, maxDepth, seen))
+                        {
+                            yield return childArr;
+                        }
+                    }
+                }
+
+                type = type.BaseType;
+            }
+        }
+
+        static bool LooksLikePlayerContainerMember(string memberName, Type memberType)
+        {
+            string n = memberName ?? string.Empty;
+            string t = memberType?.FullName ?? string.Empty;
+
+            return ContainsIgnoreCase(n, "slot", "item", "stack", "bag", "backpack", "inventory", "toolbelt", "container")
+                || ContainsIgnoreCase(t, "ItemStack", "ItemValue", "Inventory", "Bag", "Backpack", "Container");
+        }
+
+        static void TryMarkPlayerContainersDirty(EntityPlayerLocal player)
+        {
+            if (player == null)
+            {
+                return;
+            }
+
+            foreach (var rootName in new[] { "inventory", "bag", "backpack" })
+            {
+                object root = null;
+
+                try
+                {
+                    root = GetMemberValue(player, rootName);
+                }
+                catch
+                {
+                }
+
+                if (root == null)
+                {
+                    continue;
+                }
+
+                foreach (var methodName in new[] { "SetModified", "SetDirty", "MarkChanged", "OnChanged", "Changed" })
+                {
+                    TryInvokeNoArg(root, methodName);
+                }
+            }
+        }
+        static bool TryRemoveBenchMaterialsViaPlayerInventoryModel(XUi xui, string repairKitName, string requiredPartsName, int requiredPartsCount)
+        {
+            if (xui == null || string.IsNullOrEmpty(repairKitName))
+            {
+                return false;
+            }
+
+            try
+            {
+                var playerInventory = xui.PlayerInventory;
+                if (playerInventory == null)
+                {
+                    CompatLog.Out("[DeadAirRepair] TryRemoveBenchMaterialsViaPlayerInventoryModel: xui.PlayerInventory is null");
+                    return false;
+                }
+
+                Recipe recipe = new Recipe();
+
+                if (!TryAddIngredientByName(recipe, repairKitName, 1))
+                {
+                    CompatLog.Out($"[DeadAirRepair] TryRemoveBenchMaterialsViaPlayerInventoryModel: failed to add repair kit ingredient '{repairKitName}'");
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(requiredPartsName) && requiredPartsCount > 0)
+                {
+                    if (!TryAddIngredientByName(recipe, requiredPartsName, requiredPartsCount))
+                    {
+                        CompatLog.Out($"[DeadAirRepair] TryRemoveBenchMaterialsViaPlayerInventoryModel: failed to add parts ingredient '{requiredPartsName}' x{requiredPartsCount}");
+                        return false;
+                    }
+                }
+
+                CompatLog.Out($"[DeadAirRepair] Removing bench materials via XUiM_PlayerInventory.RemoveItems(): kit={repairKitName} x1, parts={requiredPartsName} x{requiredPartsCount}");
+
+                // This is the earlier known-good live inventory removal path.
+                playerInventory.RemoveItems(recipe.ingredients);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CompatLog.Out($"[DeadAirRepair] TryRemoveBenchMaterialsViaPlayerInventoryModel exception: {ex.Message}");
+                return false;
+            }
+        }
+
+        static bool TryAddIngredientByName(Recipe recipe, string itemName, int count)
+        {
+            if (recipe == null || string.IsNullOrEmpty(itemName) || count <= 0)
+            {
+                return false;
+            }
+
+            var itemClass = ResolveItemClassByName(itemName);
+            if (itemClass == null)
+            {
+                CompatLog.Out($"[DeadAirRepair] TryAddIngredientByName: could not resolve ItemClass for '{itemName}'");
+                return false;
+            }
+
+            try
+            {
+                recipe.ingredients.Add(new ItemStack(new ItemValue(itemClass.Id), count));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CompatLog.Out($"[DeadAirRepair] TryAddIngredientByName failed for '{itemName}': {ex.Message}");
+                return false;
+            }
+        }
+
+        static ItemClass ResolveItemClassByName(string itemName)
+        {
+            if (string.IsNullOrEmpty(itemName))
+            {
+                return null;
+            }
+
+            try
+            {
+                // Common signatures seen across 7DTD versions/mod contexts.
+                var mi = typeof(ItemClass).GetMethod(
+                    "GetItemClass",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string) },
+                    null);
+
+                if (mi != null)
+                {
+                    var result = mi.Invoke(null, new object[] { itemName }) as ItemClass;
+                    if (result != null)
+                    {
+                        return result;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var mi = typeof(ItemClass).GetMethod(
+                    "GetItemClass",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string), typeof(bool) },
+                    null);
+
+                if (mi != null)
+                {
+                    var result = mi.Invoke(null, new object[] { itemName, false }) as ItemClass;
+                    if (result != null)
+                    {
+                        return result;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var mi = typeof(ItemClass).GetMethod(
+                    "GetForIdOrName",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string) },
+                    null);
+
+                if (mi != null)
+                {
+                    var result = mi.Invoke(null, new object[] { itemName }) as ItemClass;
+                    if (result != null)
+                    {
+                        return result;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        static bool TryAddStackToPlayer(EntityPlayerLocal player, ItemStack stack)
+        {
+            if (player == null || stack.IsEmpty())
+            {
+                return false;
+            }
+
+            try
+            {
+                var inv = GetMemberValue(player, "inventory");
+                if (inv != null)
+                {
+                    foreach (var name in new[] { "AddItem", "AddItemStack", "AddItemNotEmpty" })
+                    {
+                        var mi = inv.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(ItemStack) }, null);
+                        if (mi != null)
+                        {
+                            mi.Invoke(inv, new object[] { stack });
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var bag = GetMemberValue(player, "bag");
+                if (bag != null)
+                {
+                    var mi = bag.GetType().GetMethod("AddItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(ItemStack) }, null);
+                    if (mi != null)
+                    {
+                        mi.Invoke(bag, new object[] { stack });
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+    sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+    {
+        public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+
+        public new bool Equals(object x, object y)
+        {
+            return ReferenceEquals(x, y);
+        }
+
+        public int GetHashCode(object obj)
+        {
+            return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+        }
+    }
+    public static void TryRepairFromUiButton(XUiC_SimpleButton button)
+    {
+        var btnId = DeadAirGameApiCompat.TryGetXUiControlName(button);
+        if (button == null || !string.Equals(btnId, "btnDeadAirWeaponRepair", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        CompatLog.Out("[DeadAirRepair] Repair button hit via XUiC_SimpleButton.Btn_OnPress");
+
+        if (!DeadAirWeaponRepairState.TryBeginRepairClick())
+        {
+            return;
+        }
+
+        var player = button?.xui?.playerUI?.entityPlayer as EntityPlayerLocal
+            ?? GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
+        if (player == null)
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: no local player from bench UI / primary player");
+            return;
+        }
+
+        var te = ResolveBenchFromButton(button);
+        if (te == null)
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: no active weapon repair bench resolved from button context");
+            DeadAirNotify.Msg(player, "deadairRepairNoBench");
+            return;
+        }
+
+        if (!IsWeaponBenchButtonContext(button))
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: button context is not the DeadAir weapon repair bench");
+            DeadAirNotify.Msg(player, "deadairRepairNoBench");
+            return;
+        }
+
+        var tools = TryGetToolStacks(te);
+        if (tools == null || tools.Length < 1)
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: tool slots missing");
+            DeadAirNotify.Msg(player, "deadairRepairBadSlots");
+            return;
+        }
+
+        var weapon = tools[0];
+
+        CompatLog.Out($"[DeadAirRepair] BEFORE weapon={GetStackName(weapon)} useTimes={GetUseTimesSafe(weapon.itemValue)} count={weapon.count}");
+
+        if (weapon.IsEmpty() || weapon.itemValue.ItemClass == null)
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: weapon slot empty");
+            DeadAirNotify.Msg(player, "deadairRepairNeedWeapon");
+            return;
+        }
+
+        var weaponClass = weapon.itemValue.ItemClass;
+        CompatLog.Out($"[DeadAirRepair] weaponClass={weaponClass?.Name}");
+
+        if (weaponClass == null || !DeadAirWeaponBenchHelpers.IsSupportedWeapon(weaponClass.Name))
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: unsupported or invalid weapon");
+            DeadAirNotify.Msg(player, "deadairRepairNotWeapon");
+            return;
+        }
+
+        if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(weaponClass.Name))
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: bench refurb is for firearms only (not bows/crossbows)");
+            DeadAirNotify.Msg(player, "deadairRepairBenchFirearmsOnly");
+            return;
+        }
+
+        var requiredPartsName = DeadAirWeaponBenchHelpers.GetRepairPartName(weaponClass.Name);
+        if (string.IsNullOrEmpty(requiredPartsName))
+        {
+            CompatLog.Out($"[DeadAirRepair] FAIL: no required parts mapping for weapon={weaponClass.Name}");
+            DeadAirNotify.Msg(player, "deadairRepairWrongParts");
+            return;
+        }
+
+        int need = DeadAirWeaponBenchHelpers.GetQualityScaledPartCount(weapon.itemValue);
+
+        if (IsFullyRepaired(weapon.itemValue))
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: weapon already fully repaired");
+            DeadAirNotify.Msg(player, "deadairRepairAlreadyFull");
+            return;
+        }
+
+        ReturnLegacyHiddenToolSlotsToPlayer(player, tools);
+
+        int availableKits = CountPlayerItem(player, DeadAirWeaponRepairState.RepairKitName);
+        if (availableKits < 1)
+        {
+            CompatLog.Out($"[DeadAirRepair] FAIL: repair kit missing in player inventory. have={availableKits}");
+            DeadAirNotify.Msg(player, "deadairRepairNeedKit");
+            return;
+        }
+
+        int availableParts = CountPlayerItem(player, requiredPartsName);
+        if (availableParts < need)
+        {
+            CompatLog.Out($"[DeadAirRepair] FAIL: not enough matching parts in player inventory. need={need}, have={availableParts}, part={requiredPartsName}");
+            DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
+            return;
+        }
+
+        if (!TryRemoveBenchMaterialsViaPlayerInventoryModel(button?.xui, DeadAirWeaponRepairState.RepairKitName, requiredPartsName, need))
+        {
+            CompatLog.Out("[DeadAirRepair] FAIL: live player inventory removal via XUiM_PlayerInventory.RemoveItems(...) failed");
+            DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
+            return;
+        }
+
+        var repaired = weapon.itemValue;
+        ApplyFullRepair(ref repaired);
+        weapon.itemValue = repaired;
+
+        tools[0] = weapon;
+
+        if (tools.Length > 1)
+        {
+            tools[1].Clear();
+        }
+
+        if (tools.Length > 2)
+        {
+            tools[2].Clear();
+        }
+
+        CompatLog.Out($"[DeadAirRepair] AFTER weapon={GetStackName(tools[0])} useTimes={GetUseTimesSafe(tools[0].itemValue)} count={tools[0].count}");
+
+        bool wroteBack = TrySetToolStacks(te, tools);
+        CompatLog.Out($"[DeadAirRepair] writeBack={wroteBack}");
+
+        TrySyncUiWorkstationModel(button, tools);
+        TryRefreshBenchState(te, button);
+        TryRefreshPlayerBackpackUi(button?.xui);
+        LogPostWriteToolStacksDiagnostics(te, button);
+        TrySyncUiWorkstationModel(button, tools);
+
+        CompatLog.Out($"[DeadAirRepair] SUCCESS: weapon={weaponClass.Name}, quality={weapon.itemValue.Quality}, partsUsed={need}, source=playerInventory");
+        DeadAirNotify.Msg(player, "deadairRepairSuccess");
+    }
         static bool IsWeaponBenchButtonContext(XUiC_SimpleButton button)
         {
             try
@@ -2157,6 +2468,234 @@ namespace DeadAir_7LongDarkDays.Patches
             catch
             {
                 return -1f;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes/counts items using Inventory GetItem/SetItem so changes persist.
+    /// (Kept in this file so a single-file sync cannot omit a separate source file.)
+    /// </summary>
+    internal static class DeadAirInventoryItemRemoval
+    {
+        static MethodInfo _getItem;
+        static MethodInfo _setItem;
+        static PropertyInfo _slotCount;
+        static bool _resolved;
+
+        static void EnsureResolved(Inventory inv)
+        {
+            if (_resolved || inv == null)
+            {
+                return;
+            }
+
+            _resolved = true;
+            var t = inv.GetType();
+
+            _getItem = t.GetMethod("GetItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int) }, null)
+                ?? t.GetMethod("GetItemInSlot", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int) }, null);
+
+            _setItem = t.GetMethod("SetItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int), typeof(ItemStack) }, null);
+
+            _slotCount = t.GetProperty("SlotCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        static int GetSlotCount(Inventory inv)
+        {
+            EnsureResolved(inv);
+            if (inv == null)
+            {
+                return 0;
+            }
+
+            try
+            {
+                if (_slotCount != null)
+                {
+                    return Convert.ToInt32(_slotCount.GetValue(inv));
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var m = inv.GetType().GetMethod("GetSlotCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (m != null)
+                {
+                    return Convert.ToInt32(m.Invoke(inv, null));
+                }
+            }
+            catch
+            {
+            }
+
+            return 0;
+        }
+
+        internal static int CountNamedItem(EntityPlayerLocal player, string itemClassName)
+        {
+            if (player?.inventory == null || string.IsNullOrEmpty(itemClassName))
+            {
+                return 0;
+            }
+
+            EnsureResolved(player.inventory);
+
+            int n = GetSlotCount(player.inventory);
+            int primaryTotal = 0;
+
+            if (_getItem != null && n > 0)
+            {
+                CompatLog.Out($"[DeadAirRepair] CountNamedItem primary path: item={itemClassName}, slotCount={n}");
+
+                for (int i = 0; i < n; i++)
+                {
+                    try
+                    {
+                        var stack = _getItem.Invoke(player.inventory, new object[] { i }) as ItemStack;
+                        if (stack == null || stack.IsEmpty() || stack.itemValue.ItemClass == null)
+                        {
+                            continue;
+                        }
+
+                        var liveName = stack.itemValue.ItemClass.Name;
+                        if (string.Equals(liveName, itemClassName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            primaryTotal += stack.count;
+                            CompatLog.Out($"[DeadAirRepair] CountNamedItem primary hit: slot={i}, item={liveName}, count={stack.count}");
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                CompatLog.Out($"[DeadAirRepair] CountNamedItem primary total for {itemClassName} = {primaryTotal}");
+
+                if (primaryTotal > 0)
+                {
+                    return primaryTotal;
+                }
+            }
+
+            int fallbackTotal = DeadAirWeaponRepairActions.CountPlayerItemLegacy(player, itemClassName);
+            CompatLog.Out($"[DeadAirRepair] CountNamedItem fallback total for {itemClassName} = {fallbackTotal}");
+            return fallbackTotal;
+        }
+
+
+        internal static bool TryRemoveNamedItem(EntityPlayerLocal player, string itemClassName, int count)
+        {
+            if (player?.inventory == null || string.IsNullOrEmpty(itemClassName) || count <= 0)
+            {
+                return false;
+            }
+
+            int before = CountNamedItem(player, itemClassName);
+            if (before < count)
+            {
+                CompatLog.Out($"[DeadAirRepair] TryRemoveNamedItem abort: item={itemClassName}, need={count}, have={before}");
+                return false;
+            }
+
+            EnsureResolved(player.inventory);
+            int nSlots = GetSlotCount(player.inventory);
+
+            bool primaryAttempted = false;
+
+            if (_getItem != null && _setItem != null && nSlots > 0)
+            {
+                primaryAttempted = true;
+
+                int remaining = count;
+                var inv = player.inventory;
+
+                for (int i = 0; i < nSlots && remaining > 0; i++)
+                {
+                    ItemStack stack;
+                    try
+                    {
+                        stack = _getItem.Invoke(inv, new object[] { i }) as ItemStack;
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (stack == null || stack.IsEmpty() || stack.itemValue.ItemClass == null)
+                    {
+                        continue;
+                    }
+
+                    if (!string.Equals(stack.itemValue.ItemClass.Name, itemClassName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    int take = stack.count < remaining ? stack.count : remaining;
+                    stack.count -= take;
+                    remaining -= take;
+
+                    if (stack.count <= 0)
+                    {
+                        stack.Clear();
+                    }
+
+                    try
+                    {
+                        _setItem.Invoke(inv, new object[] { i, stack });
+                    }
+                    catch (Exception ex)
+                    {
+                        CompatLog.Out($"[DeadAirRepair] TryRemoveNamedItem primary write failed for {itemClassName}: {ex.Message}");
+                        remaining = count;
+                        break;
+                    }
+                }
+
+                TryNotifyInventoryChanged(player.inventory);
+
+                int afterPrimary = CountNamedItem(player, itemClassName);
+                int removedPrimary = before - afterPrimary;
+
+                CompatLog.Out($"[DeadAirRepair] TryRemoveNamedItem primary verify: item={itemClassName}, before={before}, after={afterPrimary}, removed={removedPrimary}, requested={count}");
+
+                if (removedPrimary >= count)
+                {
+                    return true;
+                }
+            }
+
+            CompatLog.Out($"[DeadAirRepair] TryRemoveNamedItem falling back to legacy path for {itemClassName} (primaryAttempted={primaryAttempted})");
+
+            bool legacyOk = DeadAirWeaponRepairActions.RemovePlayerItemsLegacy(player, itemClassName, count);
+            int afterLegacy = CountNamedItem(player, itemClassName);
+            int removedTotal = before - afterLegacy;
+
+            CompatLog.Out($"[DeadAirRepair] TryRemoveNamedItem legacy verify: item={itemClassName}, before={before}, after={afterLegacy}, removed={removedTotal}, requested={count}, legacyOk={legacyOk}");
+
+            return legacyOk && removedTotal >= count;
+        }
+        static void TryNotifyInventoryChanged(Inventory inv)
+        {
+            if (inv == null)
+            {
+                return;
+            }
+
+            foreach (var name in new[] { "CallOnToolbeltChangedInternal", "SetAsModified", "MarkChanged" })
+            {
+                try
+                {
+                    var m = inv.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                    m?.Invoke(inv, null);
+                }
+                catch
+                {
+                }
             }
         }
     }
