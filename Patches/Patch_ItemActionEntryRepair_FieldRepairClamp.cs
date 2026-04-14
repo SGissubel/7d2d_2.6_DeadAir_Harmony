@@ -7,29 +7,24 @@ using UnityEngine;
 namespace DeadAir_7LongDarkDays.Patches
 {
     /// <summary>
-    /// Normal in-pocket / inventory repair for supported weapons.
-    ///
-    /// Rules:
-    /// - applies only outside the custom weapon bench
-    /// - consume only the repair kit through the normal vanilla repair path
-    /// - do NOT consume weapon parts here
-    /// - clamp repair effectiveness to 10% of max durability
-    ///
-    /// This intentionally mirrors the older working split:
-    /// supported weapon + normal repair path + not bench = partial repair only
+    /// Inventory / in-pocket repair for supported weapons: after vanilla applies repair in the same
+    /// activation call, clamp durability so at most ~10% of max is restored per action (weapon repair kit).
+    /// Bench window is skipped so the weapon bench Refurbish flow is untouched.
     /// </summary>
     [HarmonyPatch]
     public static class Patch_ItemActionEntryRepair_FieldRepairClamp
     {
         const float FieldRepairFraction = 0.10f;
 
-        struct ClampState
+        struct PendingState
         {
-            internal bool Active;
+            internal bool Armed;
             internal float UseTimesBefore;
-            internal ItemStack StackRef;
             internal string WeaponName;
         }
+
+        static readonly Dictionary<object, PendingState> PendingByController =
+            new Dictionary<object, PendingState>(ReferenceEqualityComparer.Instance);
 
         static IEnumerable<MethodBase> TargetMethods()
         {
@@ -45,119 +40,179 @@ namespace DeadAir_7LongDarkDays.Patches
             }
         }
 
-        static void Prefix(ItemActionEntryRepair __instance, ref ClampState __state)
+        static void Prefix(ItemActionEntryRepair __instance)
         {
-            __state = default;
-
-            CompatLog.Out("[DeadAirFieldRepair] Prefix hit");
-
             var xui = __instance?.ItemController?.xui;
             if (DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(xui))
             {
-                CompatLog.Out("[DeadAirFieldRepair] Skipping because weapon bench is open");
                 return;
             }
 
             var stack = TryGetItemStack(__instance);
             if (stack == null || stack.IsEmpty())
             {
-                CompatLog.Out("[DeadAirFieldRepair] No item stack found");
                 return;
             }
 
-            var ic = stack.itemValue?.ItemClass;
-            CompatLog.Out($"[DeadAirFieldRepair] Item={ic?.Name ?? "<null>"} useTimesBefore={GetUseTimesSafe(stack.itemValue)}");
+            var iv = stack.itemValue;
+            var ic = iv?.ItemClass;
 
-            if (ic == null)
+            if (ic == null || !DeadAirWeaponBenchHelpers.IsSupportedWeapon(ic.Name))
             {
                 return;
             }
 
-            // Important:
-            // do NOT gate on DeadAirGameApiCompat.ItemClassHasAnyRepairTool(ic)
-            // that compat gate was what prevented activation in the recent logs.
-            if (!DeadAirWeaponBenchHelpers.IsSupportedWeapon(ic.Name))
+            float beforeUseTimes = GetUseTimesSafe(iv);
+            if (beforeUseTimes <= 0f)
             {
-                CompatLog.Out("[DeadAirFieldRepair] Item is not a supported DeadAir weapon");
                 return;
             }
 
-            __state.Active = true;
-            __state.UseTimesBefore = GetUseTimesSafe(stack.itemValue);
-            __state.StackRef = stack;
-            __state.WeaponName = ic.Name;
+            var key = GetRepairContextKey(__instance);
+            if (key == null)
+            {
+                return;
+            }
 
-            CompatLog.Out($"[DeadAirFieldRepair] Armed for supported weapon {ic.Name}");
+            PendingByController[key] = new PendingState
+            {
+                Armed = true,
+                UseTimesBefore = beforeUseTimes,
+                WeaponName = ic.Name
+            };
         }
 
-        static void Postfix(ItemActionEntryRepair __instance, ref ClampState __state)
+        /// <summary>
+        /// Runs immediately after vanilla <c>OnActivated</c>/<c>Execute</c>. Repair is applied in this call on current builds.
+        /// </summary>
+        static void Postfix(ItemActionEntryRepair __instance)
         {
-            CompatLog.Out($"[DeadAirFieldRepair] Postfix hit active={__state.Active}");
+            TryApplyFieldClampAfterVanilla(__instance, "ImmediatePostfix");
+        }
 
-            if (!__state.Active)
+        /// <summary>
+        /// Optional: timer/callback path if the game defers applying durability (Prepare fails if method missing).
+        /// </summary>
+        [HarmonyPatch]
+        static class Patch_ItemActionEntryRepair_FieldRepairCompletionFallback
+        {
+            static IEnumerable<MethodBase> TargetMethods()
             {
+                var seen = new HashSet<MethodBase>();
+
+                foreach (var mi in typeof(ItemActionEntryRepair).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                {
+                    if (mi == null || mi.IsAbstract)
+                    {
+                        continue;
+                    }
+
+                    var n = mi.Name ?? string.Empty;
+
+                    // Cast a wider net for timer/completion-style handlers.
+                    if (n.IndexOf("TimeInterval", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Elapsed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Complete", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Completed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Finish", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Finished", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        n.IndexOf("Timer", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        if (seen.Add(mi))
+                        {
+                            yield return mi;
+                        }
+                    }
+                }
+            }
+
+            static void Postfix(ItemActionEntryRepair __instance, MethodBase __originalMethod)
+            {
+                try
+                {
+                    var key = GetRepairContextKey(__instance);
+                    if (key == null)
+                    {
+                        return;
+                    }
+
+                    if (!PendingByController.TryGetValue(key, out var state) || !state.Armed)
+                    {
+                        return;
+                    }
+
+                    CompatLog.Out($"[DeadAirFieldRepair] Completion fallback hit via {__originalMethod.Name}");
+
+                    TryApplyFieldClampAfterVanilla(__instance, __originalMethod.Name);
+                }
+                catch (Exception ex)
+                {
+                    CompatLog.Out($"[DeadAirFieldRepair] Completion fallback exception in {__originalMethod?.Name ?? "<null>"}: {ex.Message}");
+                }
+            }
+        }
+        static void TryApplyFieldClampAfterVanilla(ItemActionEntryRepair __instance, string source = "Postfix")
+        {
+            var key = GetRepairContextKey(__instance);
+            if (key == null)
+            {
+                CompatLog.Out($"[DeadAirFieldRepair] {source}: no repair context key");
+                return;
+            }
+
+            if (!PendingByController.TryGetValue(key, out var state) || !state.Armed)
+            {
+                CompatLog.Out($"[DeadAirFieldRepair] {source}: no armed pending state");
                 return;
             }
 
             var xui = __instance?.ItemController?.xui;
             if (DeadAirWeaponBenchHelpers.IsWeaponBenchOpen(xui))
             {
-                CompatLog.Out("[DeadAirFieldRepair] Postfix skip because weapon bench is open");
+                PendingByController.Remove(key);
                 return;
             }
 
-            var stack = __state.StackRef ?? TryGetItemStack(__instance);
+            var stack = TryGetItemStack(__instance);
             if (stack == null || stack.IsEmpty())
             {
-                CompatLog.Out("[DeadAirFieldRepair] No item stack found in Postfix");
+                PendingByController.Remove(key);
                 return;
             }
 
             var iv = stack.itemValue;
-            if (iv == null)
+            if (iv == null || iv.ItemClass == null ||
+                !string.Equals(iv.ItemClass.Name, state.WeaponName, StringComparison.OrdinalIgnoreCase))
             {
-                CompatLog.Out("[DeadAirFieldRepair] ItemValue null in Postfix");
+                PendingByController.Remove(key);
                 return;
             }
 
             float afterVanilla = GetUseTimesSafe(iv);
-            CompatLog.Out($"[DeadAirFieldRepair] useTimes before={__state.UseTimesBefore} afterVanilla={afterVanilla}");
 
-            // If vanilla did not improve the weapon, do nothing.
-            if (afterVanilla >= __state.UseTimesBefore)
+            // Repair not applied in this call yet — keep pending for a later Postfix (e.g. timer callback).
+            if (afterVanilla >= state.UseTimesBefore - 0.01f)
             {
-                CompatLog.Out("[DeadAirFieldRepair] Vanilla did not improve durability; no clamp needed");
+                    CompatLog.Out($"[DeadAirFieldRepair] {source}: no durability improvement yet (before={state.UseTimesBefore}, after={afterVanilla})");
+
                 return;
             }
 
             float maxUt = TryGetMaxUseTimes(iv);
             if (maxUt <= 0f)
             {
-                CompatLog.Out("[DeadAirFieldRepair] Invalid MaxUseTimes");
+                PendingByController.Remove(key);
                 return;
             }
 
-            // Older working logic was "cap field repair to X% of total durability".
-            // In useTimes terms, lower is better, so clamp the final useTimes to:
-            // original damage minus at most 10% of max durability.
             float fieldRepairAmount = Mathf.Max(1f, Mathf.Ceil(maxUt * FieldRepairFraction));
-            float clampedTargetUseTimes = Mathf.Max(0f, __state.UseTimesBefore - fieldRepairAmount);
+            float clampedTargetUseTimes = Mathf.Max(0f, state.UseTimesBefore - fieldRepairAmount);
 
-            CompatLog.Out($"[DeadAirFieldRepair] maxUseTimes={maxUt} fieldRepairAmount={fieldRepairAmount} clampedTargetUseTimes={clampedTargetUseTimes}");
-
-            // Only clamp if vanilla repaired MORE than our allowed field-repair cap.
-            // Example:
-            // - before = 267 damage
-            // - vanilla after = 0 (full repair)
-            // - clamp target = 240
-            // Then we force it back to 240 damage remaining.
-            if (afterVanilla < clampedTargetUseTimes)
+            // Vanilla over-repaired — restore UseTimes so only ~10% of max durability is recovered per action.
+            if (afterVanilla < clampedTargetUseTimes - 0.01f)
             {
                 ApplyUseTimesAndPercentage(ref iv, clampedTargetUseTimes, maxUt);
-
-                bool wroteBack = TryWriteBackClampedItem(__instance, iv);
-
-                // Fallback in case the controller write-back path is not available
+                TryWriteBackPatchedItem(__instance, iv, state.UseTimesBefore);
                 stack.itemValue = iv;
 
                 try
@@ -170,16 +225,24 @@ namespace DeadAir_7LongDarkDays.Patches
                 catch
                 {
                 }
-
-                CompatLog.Out($"[DeadAirFieldRepair] Clamp applied. wroteBack={wroteBack} finalUseTimes={GetUseTimesSafe(iv)}");
             }
-            else
+            CompatLog.Out($"[DeadAirFieldRepair] {source}: pending state cleared");
+            PendingByController.Remove(key);
+        }
+
+        static object GetRepairContextKey(ItemActionEntryRepair __instance)
+        {
+            try
             {
-                CompatLog.Out("[DeadAirFieldRepair] Vanilla repair was already within field cap");
+                return __instance?.ItemController ?? (object)__instance;
+            }
+            catch
+            {
+                return __instance;
             }
         }
 
-        static bool TryWriteBackClampedItem(ItemActionEntryRepair __instance, ItemValue clampedValue)
+        static bool TryWriteBackPatchedItem(ItemActionEntryRepair __instance, ItemValue patchedValue, float originalUseTimes)
         {
             try
             {
@@ -188,7 +251,7 @@ namespace DeadAir_7LongDarkDays.Patches
                     var liveStack = equipmentStack.ItemStack;
                     if (liveStack != null && !liveStack.IsEmpty())
                     {
-                        liveStack.itemValue = clampedValue;
+                        liveStack.itemValue = patchedValue;
                         equipmentStack.ItemStack = liveStack;
                         return true;
                     }
@@ -199,15 +262,107 @@ namespace DeadAir_7LongDarkDays.Patches
                     var liveStack = itemControllerStack.ItemStack;
                     if (liveStack != null && !liveStack.IsEmpty())
                     {
-                        liveStack.itemValue = clampedValue;
+                        liveStack.itemValue = patchedValue;
                         itemControllerStack.ItemStack = liveStack;
                         return true;
                     }
                 }
+
+                var player = __instance?.ItemController?.xui?.playerUI?.entityPlayer as EntityPlayerLocal;
+                if (player?.inventory == null)
+                {
+                    return false;
+                }
+
+                var targetClassName = patchedValue?.ItemClass?.Name;
+                if (string.IsNullOrEmpty(targetClassName))
+                {
+                    return false;
+                }
+
+                var inv = player.inventory;
+                var invType = inv.GetType();
+
+                var getItem = invType.GetMethod("GetItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int) }, null)
+                           ?? invType.GetMethod("GetItemInSlot", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int) }, null);
+
+                var setItem = invType.GetMethod("SetItem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int), typeof(ItemStack) }, null);
+
+                int slotCount = 0;
+                var slotCountProp = invType.GetProperty("SlotCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (slotCountProp != null)
+                {
+                    try
+                    {
+                        slotCount = Convert.ToInt32(slotCountProp.GetValue(inv));
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (slotCount <= 0)
+                {
+                    var getSlotCount = invType.GetMethod("GetSlotCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                    if (getSlotCount != null)
+                    {
+                        try
+                        {
+                            slotCount = Convert.ToInt32(getSlotCount.Invoke(inv, null));
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+
+                if (getItem == null || setItem == null || slotCount <= 0)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < slotCount; i++)
+                {
+                    try
+                    {
+                        var slotStack = getItem.Invoke(inv, new object[] { i }) as ItemStack;
+                        if (slotStack == null || slotStack.IsEmpty() || slotStack.itemValue?.ItemClass == null)
+                        {
+                            continue;
+                        }
+
+                        if (!string.Equals(slotStack.itemValue.ItemClass.Name, targetClassName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        float slotUseTimes = GetUseTimesSafe(slotStack.itemValue);
+
+                        if (Math.Abs(slotUseTimes - originalUseTimes) > 0.01f)
+                        {
+                            continue;
+                        }
+
+                        slotStack.itemValue = patchedValue;
+                        setItem.Invoke(inv, new object[] { i, slotStack });
+
+                        try
+                        {
+                            inv.CallOnToolbeltChangedInternal();
+                        }
+                        catch
+                        {
+                        }
+
+                        return true;
+                    }
+                    catch
+                    {
+                    }
+                }
             }
-            catch (Exception ex)
+            catch
             {
-                CompatLog.Out($"[DeadAirFieldRepair] TryWriteBackClampedItem failed: {ex.Message}");
             }
 
             return false;
@@ -220,14 +375,12 @@ namespace DeadAir_7LongDarkDays.Patches
                 return null;
             }
 
-            // 1) Probe the repair action object itself
             var direct = TryGetItemStackFromObject(__instance);
             if (direct != null && !direct.IsEmpty())
             {
                 return direct;
             }
 
-            // 2) Probe the ItemController
             object itemController = null;
             try
             {
@@ -243,7 +396,6 @@ namespace DeadAir_7LongDarkDays.Patches
                 return fromController;
             }
 
-            // 3) Probe common nested members on both action + controller
             foreach (var memberName in new[]
             {
                 "itemController",
@@ -395,10 +547,12 @@ namespace DeadAir_7LongDarkDays.Patches
                         {
                             return f;
                         }
+
                         if (v is int i)
                         {
                             return i;
                         }
+
                         return Convert.ToSingle(v);
                     }
                 }
@@ -436,6 +590,21 @@ namespace DeadAir_7LongDarkDays.Patches
             catch
             {
                 return -1f;
+            }
+        }
+
+        sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+
+            public new bool Equals(object x, object y)
+            {
+                return ReferenceEquals(x, y);
+            }
+
+            public int GetHashCode(object obj)
+            {
+                return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
             }
         }
     }
