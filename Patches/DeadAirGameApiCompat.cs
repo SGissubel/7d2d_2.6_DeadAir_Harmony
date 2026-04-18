@@ -28,11 +28,9 @@ namespace DeadAir_7LongDarkDays.Patches
             if (ic == null)
                 return false;
 
-            CompatLog.Out($"[DeadAirRepair] Compat check item IC={ic}");
             var p = typeof(ItemClass).GetProperty("RepairTools", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            CompatLog.Out($"[DeadAirRepair] Compat check item P={p}");
             var val = p?.GetValue(ic);
-            CompatLog.Out($"[DeadAirRepair] Compat check item VAL={val}");
+
             if (val == null)
                 return false;
 

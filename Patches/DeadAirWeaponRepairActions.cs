@@ -48,7 +48,7 @@ namespace DeadAir_7LongDarkDays.Patches
             return DeadAirInventoryItemRemoval.CountNamedItem(player, itemName);
         }
 
-        static void TryRefreshPlayerBackpackUi(XUi xui)
+        internal static void TryRefreshPlayerBackpackUi(XUi xui)
         {
             if (xui == null)
             {
@@ -167,8 +167,6 @@ namespace DeadAir_7LongDarkDays.Patches
                 {
                 }
             }
-
-            CompatLog.Out($"[DeadAirRepair] Refreshed controller: {controller.GetType().FullName}");
 
             foreach (var child in EnumerateChildControllers(controller))
             {
@@ -690,166 +688,184 @@ namespace DeadAir_7LongDarkDays.Patches
             return false;
         }
 
-    sealed class ReferenceEqualityComparer : IEqualityComparer<object>
-    {
-        public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+        sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
 
-        public new bool Equals(object x, object y)
-        {
-            return ReferenceEquals(x, y);
-        }
+            public new bool Equals(object x, object y)
+            {
+                return ReferenceEquals(x, y);
+            }
 
-        public int GetHashCode(object obj)
-        {
-            return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+            public int GetHashCode(object obj)
+            {
+                return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+            }
         }
-    }
-    public static void TryRepairFromUiButton(XUiC_SimpleButton button)
-    {
-        var btnId = DeadAirGameApiCompat.TryGetXUiControlName(button);
-        if (button == null || !string.Equals(btnId, "btnDeadAirWeaponRepair", StringComparison.OrdinalIgnoreCase))
+        public static void TryRepairFromUiButton(XUiC_SimpleButton button)
         {
+            var btnId = DeadAirGameApiCompat.TryGetXUiControlName(button);
+            if (button == null || !string.Equals(btnId, "btnDeadAirWeaponRepair", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            CompatLog.Out("[DeadAirRepair] Repair button hit via XUiC_SimpleButton.Btn_OnPress");
+
+            if (!DeadAirWeaponRepairState.TryBeginRepairClick())
+            {
+                return;
+            }
+
+            var player = button?.xui?.playerUI?.entityPlayer as EntityPlayerLocal
+                ?? GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
+            if (player == null)
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: no local player from bench UI / primary player");
+                return;
+            }
+
+            var te = ResolveBenchFromButton(button);
+            if (te == null)
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: no active weapon repair bench resolved from button context");
+                DeadAirNotify.Msg(player, "deadairRepairNoBench");
+                return;
+            }
+
+            if (!IsWeaponBenchButtonContext(button))
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: button context is not the DeadAir weapon repair bench");
+                DeadAirNotify.Msg(player, "deadairRepairNoBench");
+                return;
+            }
+
+            var tools = TryGetToolStacks(te);
+            if (tools == null || tools.Length < 1)
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: tool slots missing");
+                DeadAirNotify.Msg(player, "deadairRepairBadSlots");
+                return;
+            }
+
+            var weapon = tools[0];
+
+            CompatLog.Out($"[DeadAirRepair] BEFORE weapon={GetStackName(weapon)} useTimes={GetUseTimesSafe(weapon.itemValue)} count={weapon.count}");
+
+            if (weapon.IsEmpty() || weapon.itemValue.ItemClass == null)
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: weapon slot empty");
+                DeadAirNotify.Msg(player, "deadairRepairNeedWeapon");
+                return;
+            }
+
+            var weaponClass = weapon.itemValue.ItemClass;
+            CompatLog.Out($"[DeadAirRepair] weaponClass={weaponClass?.Name}");
+
+            if (weaponClass == null || !DeadAirWeaponBenchHelpers.IsSupportedWeapon(weaponClass.Name))
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: unsupported or invalid weapon");
+                DeadAirNotify.Msg(player, "deadairRepairNotWeapon");
+                return;
+            }
+
+            if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(weaponClass.Name))
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: bench refurb is for firearms only (not bows/crossbows)");
+                DeadAirNotify.Msg(player, "deadairRepairBenchFirearmsOnly");
+                return;
+            }
+
+            var requiredPartsName = DeadAirWeaponBenchHelpers.GetRepairPartName(weaponClass.Name);
+            if (string.IsNullOrEmpty(requiredPartsName))
+            {
+                CompatLog.Out($"[DeadAirRepair] FAIL: no required parts mapping for weapon={weaponClass.Name}");
+                DeadAirNotify.Msg(player, "deadairRepairWrongParts");
+                return;
+            }
+
+            int need = DeadAirWeaponBenchHelpers.GetQualityScaledPartCount(weapon.itemValue);
+
+            if (IsFullyRepaired(weapon.itemValue))
+            {
+                CompatLog.Out("[DeadAirRepair] FAIL: weapon already fully repaired");
+                DeadAirNotify.Msg(player, "deadairRepairAlreadyFull");
+                return;
+            }
+
+            ReturnLegacyHiddenToolSlotsToPlayer(player, tools);
+
+            int availableKits = CountPlayerItem(player, DeadAirWeaponRepairState.RepairKitName);
+            if (availableKits < 1)
+            {
+                CompatLog.Out($"[DeadAirRepair] FAIL: repair kit missing in player inventory. have={availableKits}");
+                DeadAirNotify.Msg(player, "deadairRepairNeedKit");
+                return;
+            }
+
+            int availableParts = CountPlayerItem(player, requiredPartsName);
+            if (availableParts < need)
+            {
+                CompatLog.Out($"[DeadAirRepair] FAIL: not enough matching parts in player inventory. need={need}, have={availableParts}, part={requiredPartsName}");
+                DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
+                return;
+            }
+
+            if (DeadAirWeaponBenchRepairQueue.IsRepairInProgress(te))
+            {
+                DeadAirNotify.Msg(player, "deadairRepairBenchBusy");
+                return;
+            }
+
+            if (!DeadAirWeaponBenchRepairQueue.TryScheduleRepair(te, player, weaponClass.Name, requiredPartsName, need))
+            {
+                DeadAirNotify.Msg(player, "deadairRepairBenchBusy");
+                TryRefreshPlayerBackpackUi(button?.xui);
+                return;
+            }
+
+            if (!TryRemoveBenchMaterialsViaPlayerInventoryModel(button?.xui, DeadAirWeaponRepairState.RepairKitName, requiredPartsName, need))
+            {
+                DeadAirWeaponBenchRepairQueue.CancelForBench(te);
+                CompatLog.Out("[DeadAirRepair] FAIL: live player inventory removal via XUiM_PlayerInventory.RemoveItems(...) failed");
+                DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
+                TryRefreshPlayerBackpackUi(button?.xui);
+                return;
+            }
+
+            CompatLog.Out($"[DeadAirRepair] SCHEDULED refurbish (1 min): weapon={weaponClass.Name}, partsUsed={need} (durability applies when timer completes)");
+            DeadAirNotify.Msg(player, "deadairRepairStarted");
+            TryRefreshPlayerBackpackUi(button?.xui);
             return;
+            // return;
+            // weapon.itemValue = repaired;
+
+            // tools[0] = weapon;
+
+            // if (tools.Length > 1)
+            // {
+            //     tools[1].Clear();
+            // }
+
+            // if (tools.Length > 2)
+            // {
+            //     tools[2].Clear();
+            // }
+
+            // CompatLog.Out($"[DeadAirRepair] AFTER weapon={GetStackName(tools[0])} useTimes={GetUseTimesSafe(tools[0].itemValue)} count={tools[0].count}");
+
+            // bool wroteBack = TrySetToolStacks(te, tools);
+            // CompatLog.Out($"[DeadAirRepair] writeBack={wroteBack}");
+
+            // TrySyncUiWorkstationModel(button, tools);
+            // TryRefreshBenchState(te, button);
+            // TryRefreshPlayerBackpackUi(button?.xui);
+            // LogPostWriteToolStacksDiagnostics(te, button);
+            // TrySyncUiWorkstationModel(button, tools);
+
+            // CompatLog.Out($"[DeadAirRepair] SUCCESS: weapon={weaponClass.Name}, quality={weapon.itemValue.Quality}, partsUsed={need}, source=playerInventory");
+            // DeadAirNotify.Msg(player, "deadairRepairSuccess");
         }
-
-        CompatLog.Out("[DeadAirRepair] Repair button hit via XUiC_SimpleButton.Btn_OnPress");
-
-        if (!DeadAirWeaponRepairState.TryBeginRepairClick())
-        {
-            return;
-        }
-
-        var player = button?.xui?.playerUI?.entityPlayer as EntityPlayerLocal
-            ?? GameManager.Instance?.World?.GetPrimaryPlayer() as EntityPlayerLocal;
-        if (player == null)
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: no local player from bench UI / primary player");
-            return;
-        }
-
-        var te = ResolveBenchFromButton(button);
-        if (te == null)
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: no active weapon repair bench resolved from button context");
-            DeadAirNotify.Msg(player, "deadairRepairNoBench");
-            return;
-        }
-
-        if (!IsWeaponBenchButtonContext(button))
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: button context is not the DeadAir weapon repair bench");
-            DeadAirNotify.Msg(player, "deadairRepairNoBench");
-            return;
-        }
-
-        var tools = TryGetToolStacks(te);
-        if (tools == null || tools.Length < 1)
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: tool slots missing");
-            DeadAirNotify.Msg(player, "deadairRepairBadSlots");
-            return;
-        }
-
-        var weapon = tools[0];
-
-        CompatLog.Out($"[DeadAirRepair] BEFORE weapon={GetStackName(weapon)} useTimes={GetUseTimesSafe(weapon.itemValue)} count={weapon.count}");
-
-        if (weapon.IsEmpty() || weapon.itemValue.ItemClass == null)
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: weapon slot empty");
-            DeadAirNotify.Msg(player, "deadairRepairNeedWeapon");
-            return;
-        }
-
-        var weaponClass = weapon.itemValue.ItemClass;
-        CompatLog.Out($"[DeadAirRepair] weaponClass={weaponClass?.Name}");
-
-        if (weaponClass == null || !DeadAirWeaponBenchHelpers.IsSupportedWeapon(weaponClass.Name))
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: unsupported or invalid weapon");
-            DeadAirNotify.Msg(player, "deadairRepairNotWeapon");
-            return;
-        }
-
-        if (!DeadAirWeaponBenchHelpers.IsFirearmSupportedWeapon(weaponClass.Name))
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: bench refurb is for firearms only (not bows/crossbows)");
-            DeadAirNotify.Msg(player, "deadairRepairBenchFirearmsOnly");
-            return;
-        }
-
-        var requiredPartsName = DeadAirWeaponBenchHelpers.GetRepairPartName(weaponClass.Name);
-        if (string.IsNullOrEmpty(requiredPartsName))
-        {
-            CompatLog.Out($"[DeadAirRepair] FAIL: no required parts mapping for weapon={weaponClass.Name}");
-            DeadAirNotify.Msg(player, "deadairRepairWrongParts");
-            return;
-        }
-
-        int need = DeadAirWeaponBenchHelpers.GetQualityScaledPartCount(weapon.itemValue);
-
-        if (IsFullyRepaired(weapon.itemValue))
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: weapon already fully repaired");
-            DeadAirNotify.Msg(player, "deadairRepairAlreadyFull");
-            return;
-        }
-
-        ReturnLegacyHiddenToolSlotsToPlayer(player, tools);
-
-        int availableKits = CountPlayerItem(player, DeadAirWeaponRepairState.RepairKitName);
-        if (availableKits < 1)
-        {
-            CompatLog.Out($"[DeadAirRepair] FAIL: repair kit missing in player inventory. have={availableKits}");
-            DeadAirNotify.Msg(player, "deadairRepairNeedKit");
-            return;
-        }
-
-        int availableParts = CountPlayerItem(player, requiredPartsName);
-        if (availableParts < need)
-        {
-            CompatLog.Out($"[DeadAirRepair] FAIL: not enough matching parts in player inventory. need={need}, have={availableParts}, part={requiredPartsName}");
-            DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
-            return;
-        }
-
-        if (!TryRemoveBenchMaterialsViaPlayerInventoryModel(button?.xui, DeadAirWeaponRepairState.RepairKitName, requiredPartsName, need))
-        {
-            CompatLog.Out("[DeadAirRepair] FAIL: live player inventory removal via XUiM_PlayerInventory.RemoveItems(...) failed");
-            DeadAirNotify.Msg(player, "deadairRepairNotEnoughParts");
-            return;
-        }
-
-        var repaired = weapon.itemValue;
-        ApplyFullRepair(ref repaired);
-        weapon.itemValue = repaired;
-
-        tools[0] = weapon;
-
-        if (tools.Length > 1)
-        {
-            tools[1].Clear();
-        }
-
-        if (tools.Length > 2)
-        {
-            tools[2].Clear();
-        }
-
-        CompatLog.Out($"[DeadAirRepair] AFTER weapon={GetStackName(tools[0])} useTimes={GetUseTimesSafe(tools[0].itemValue)} count={tools[0].count}");
-
-        bool wroteBack = TrySetToolStacks(te, tools);
-        CompatLog.Out($"[DeadAirRepair] writeBack={wroteBack}");
-
-        TrySyncUiWorkstationModel(button, tools);
-        TryRefreshBenchState(te, button);
-        TryRefreshPlayerBackpackUi(button?.xui);
-        LogPostWriteToolStacksDiagnostics(te, button);
-        TrySyncUiWorkstationModel(button, tools);
-
-        CompatLog.Out($"[DeadAirRepair] SUCCESS: weapon={weaponClass.Name}, quality={weapon.itemValue.Quality}, partsUsed={need}, source=playerInventory");
-        DeadAirNotify.Msg(player, "deadairRepairSuccess");
-    }
         static bool IsWeaponBenchButtonContext(XUiC_SimpleButton button)
         {
             try
@@ -1335,7 +1351,7 @@ namespace DeadAir_7LongDarkDays.Patches
             {
                 return;
             }
-
+            
             try
             {
                 var wg = button.windowGroup?.Controller as XUiC_WorkstationWindowGroup;

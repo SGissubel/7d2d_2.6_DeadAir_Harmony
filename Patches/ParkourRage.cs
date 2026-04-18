@@ -21,7 +21,7 @@ namespace DeadAir_7LongDarkDays.Patches
         private const float RequiredDuration = 1.5f;
         private const float TriggerCooldown = 15.0f;
         private const int MinQualifiedZombies = 3;
-        private const float MaxAllowedHeight = 4.5f;
+        private const float MaxAllowedHeight = 3.5f;
         private const int ReinforcementCount = 4;
         private const float MinSpawnDistance = 9f;
         private const float MaxSpawnDistance = 12f;
@@ -137,6 +137,11 @@ namespace DeadAir_7LongDarkDays.Patches
                     continue;
 
                 if (zombie.Buffs.HasBuff("buffDeadAirHeightRage"))
+                    continue;
+
+                // Only punish obvious "I'm perched above you and you can see me" cheese.
+                // This avoids triggering through floors/walls when the player is simply nearby above.
+                if (!zombie.CanSee(player))
                     continue;
 
                 Vector3 zombiePos = zombie.position;

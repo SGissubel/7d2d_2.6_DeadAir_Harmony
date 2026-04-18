@@ -17,7 +17,7 @@ namespace DeadAir_7LongDarkDays.Patches
         /// <summary>
         /// Values > 1 shorten the remaining wait until HordeNextTime (e.g. 2 ≈ double frequency).
         /// </summary>
-        internal static readonly float HordeFrequencyMultiplier = 10f;
+        internal static readonly float HordeFrequencyMultiplier = 7f;
 
         /// <summary>
         /// Log every Horde SetNextTime adjustment (recommended while tuning).
